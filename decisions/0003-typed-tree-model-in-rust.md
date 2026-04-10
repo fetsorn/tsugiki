@@ -119,12 +119,36 @@ impl TreeKind for Structure { type Order = Unordered; }
 impl TreeKind for Target    { type Order = Ordered; }
 ```
 
+**Note** is a translator annotation attached to a structure node. Notes from the understand phase and regrow phase are distinguished by a leading `|` inside the parenthetical:
+
+```
+(this node introduces the standard description)
+(| split into two target sentences, second carries the footnote)
+```
+
+The first form (no prefix) is an understand-phase note. The second form (`| ` prefix) is a regrow-phase note. The pipe character at position 0 inside a parenthetical is reserved; translator input containing a leading pipe is escaped or rejected.
+
+```rust
+pub enum NotePhase {
+    Understand,
+    Regrow,
+}
+
+pub struct Note {
+    pub phase: NotePhase,
+    pub text: String,
+}
+```
+
+**Open question: consecutive parentheticals in Fountain.** The Fountain spec defines parentheticals as `(text)` on their own line between dialogue lines. Tsugiki uses parentheticals outside dialogue context (attached to structure nodes in action blocks). It is unclear whether Fountain parsers treat two consecutive `(...)` lines as a single parenthetical or two separate ones. This must be tested against the Rust Fountain crates (`fountain-rs`, `rustwell`, `fountain-parser-rs`, `lottie/fount`) during Layer 2 implementation. If parsers merge consecutive parentheticals, we may need a different encoding — possibly a single parenthetical with `|` as an internal phase separator between understand and regrow text.
+
 **Node** carries its tree kind as a phantom type parameter and its depth as a runtime value:
 
 ```rust
 pub struct Node<T: TreeKind> {
     uuid: Uuid,
     depth: Depth,
+    notes: Vec<Note>,
     _tree: PhantomData<T>,
 }
 ```
