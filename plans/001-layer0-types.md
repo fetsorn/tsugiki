@@ -37,15 +37,14 @@ tsugiki-core/
 pub struct Depth(pub u8);
 ```
 
-Fountain has exactly four levels. This is a hard cap: max depth is 3. Depth 0 (`#`) is always the intent root. Depth 3 (no hash) is always the sentence leaf. Texts requiring more than four levels are split into separate intents.
+Depth counts upward from the sentence level. Depth 0 is always the sentence — the leaf unit of translation. Grouping levels above increment: Depth 1 is the first grouping level (paragraph or chapter, depending on the text), Depth 2 the next, etc. The number of levels is intent-specific. Fountain supports at most 4 levels (3 heading levels + action blocks). Texts requiring more are split into separate intents.
 
-- `Depth::child(&self) -> Option<Depth>` — returns `Some(Depth(self.0 + 1))` if `self.0 < 3`, else `None`. Depth 3 nodes cannot have children.
-- `Depth::can_contain(&self, child: &Depth) -> bool` — true when `child.0 == self.0 + 1`.
-- `Depth::is_root(&self) -> bool` — true when `self.0 == 0`.
-- `Depth::is_leaf(&self) -> bool` — true when `self.0 == 3`.
-- `Depth::fountain_marker(&self) -> Option<&'static str>` — `0 → "#"`, `1 → "##"`, `2 → "###"`, `3 → None`. Depth 3 nodes are action blocks (sentences).
-- `Depth::from_fountain_marker(s: &str) -> Option<Depth>` — inverse for the three marker levels.
-- `Depth::MAX = Depth(3)` — compile-time constant.
+- `Depth::child(&self) -> Option<Depth>` — returns `Some(Depth(self.0 - 1))` if `self.0 > 0`, else `None`. Depth 0 nodes (sentences) cannot have children.
+- `Depth::can_contain(&self, child: &Depth) -> bool` — true when `self.0 > 0 && child.0 == self.0 - 1`.
+- `Depth::is_sentence(&self) -> bool` — true when `self.0 == 0`.
+- No `is_root` — the root depth depends on the intent's tree height, not a fixed constant.
+- No `Depth::MAX` constant — the maximum depth is determined by the Fountain file's heading levels (at most 3 for `#`/`##`/`###`).
+- `Depth::from_fountain_level(heading_hashes: usize, max_heading_hashes: usize) -> Depth` — maps a Fountain heading level to a depth. `max_heading_hashes` is the number of `#` in the shallowest heading in the file. `heading_hashes == 0` (action block) always maps to Depth 0. `heading_hashes == max_heading_hashes` maps to the root depth.
 
 ### Tree kind markers (tree_kind.rs)
 
@@ -135,7 +134,7 @@ pub enum TreeError {
 ## Tests (unit, no proptest yet)
 
 1. `Depth` ordering: `Depth(0) < Depth(1) < Depth(5)`.
-2. `can_contain`: `Depth(0)` can contain `Depth(1)`, not `Depth(2)` or `Depth(0)`.
+2. `can_contain`: `Depth(2)` can contain `Depth(1)`, not `Depth(0)` or `Depth(2)`. `Depth(0)` cannot contain anything.
 3. `NodeId::prefix(8)` returns 8 hex chars, `matches_prefix` roundtrips.
 4. `Node` phantom type prevents mixing: `Node<Source>` cannot be assigned to `Node<Structure>` (compile-time, not runtime test — a doc-test showing the compiler error).
 5. `BridgeEdge` direction: `BridgeEdge<Source, Structure>` compiles, reversed order is a different type.

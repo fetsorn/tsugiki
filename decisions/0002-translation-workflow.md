@@ -25,20 +25,17 @@ The translator reads the source text and breaks it into a tree of structural uni
 **Example.** A formal congratulatory letter decomposes into six blocks: address, congratulation, merit, confidence, wishes, signature. The merit and confidence blocks each contain two sentences; the others contain one. The section markers in `source.fountain` look like:
 
 ```
-.a1b2c3d4
-# Congratulatory Letter
+# Congratulatory Letter [[a1b2c3d4]]
 
-.e5f6a7b8
-## Address
+## Address [[e5f6a7b8]]
 
-.c9d0e1f2
-Dear Colleague,
+Dear Colleague, [[c9d0e1f2]]
 ```
 
 **Edge cases and open questions:**
 - *Where to draw sentence boundaries.* Most prose has obvious sentence breaks. But some texts — legal documents, liturgical texts, stream-of-consciousness prose — have sentences that run for paragraphs. The translator decides; the tool should not force a granularity.
 - *How deep to go.* A sentence could be further decomposed into clauses. For now, sentences are the leaf level. If clause-level decomposition becomes useful, the model supports it — just add another depth level.
-- *Multiline source nodes.* A signature block or a poem stanza is a single node spanning multiple lines. In Fountain, everything between one scene heading and the next is the content of that node. This works, but a CLI walker needs to know that "node content" is not always one line.
+- *Multiline source nodes.* A signature block or a poem stanza is a single node spanning multiple lines. In Fountain, everything between one `[[uuid]]` marker and the next is the content of that node. This works, but a CLI walker needs to know that "node content" is not always one line.
 
 ### Phase 2: Understand
 
@@ -56,16 +53,13 @@ During this phase, the translator also records parenthetical notes — observati
 **Example.** The congratulatory letter's merit block ("you rock!") decomposes into two sentence-level meanings:
 
 ```
-.f3a4b5c6
-## you rock!
+## you rock! [[f3a4b5c6]]
 
-.d7e8f9a0
-anniversary marks a summit of growth
-(key is the authority acquired, not the metaphor of the path)
+anniversary marks a summit of growth [[d7e8f9a0]]
+[[key is the authority acquired, not the metaphor of the path]]
 
-.b1c2d3e4
-institution became flesh of the country
-(the source says "happiness" but the culture has "luck", not "happiness" — translator's choice whether to carry that)
+institution became flesh of the country [[b1c2d3e4]]
+[[the source says "happiness" but the culture has "luck", not "happiness" — translator's choice whether to carry that]]
 ```
 
 The parenthetical on the second sentence captures a cultural nuance that will matter in Phase 3: the source language makes a claim the translator knows is culturally loaded. The structure annotation ("institution became flesh of the country") is neutral; the parenthetical flags the tension.
@@ -95,14 +89,11 @@ During regrowth, the structure tree often gets updated. The translator adds pare
 **Example.** The "pharaoh addressing pharaoh" structure node had one source sentence but produced two target sentences:
 
 ```
-.g5h6i7j8
-## Congratulation
+## Congratulation [[g5h6i7j8]]
 
-.k9l0m1n2
-Today we celebrate ten years since the founding of the Institute.
+Today we celebrate ten years since the founding of the Institute. [[k9l0m1n2]]
 
-.o3p4q5r6
-From the bottom of our hearts, we congratulate you and everyone at the Institute!
+From the bottom of our hearts, we congratulate you and everyone at the Institute! [[o3p4q5r6]]
 ```
 
 The source language can sustain a single sentence that names the sender, the recipient, the occasion, and the congratulation. English cannot — or rather, the result would read as translated. The translator split it. Both target nodes link to the same structure node in `structure-target.csv`.
@@ -110,10 +101,9 @@ The source language can sustain a single sentence that names the sender, the rec
 Meanwhile, `structure.fountain` gained a parenthetical during this phase:
 
 ```
-.s7t8u9v0
-## pharaoh addressing pharaoh
-(institution-to-institution through human faces)
-(english can't sustain the single-sentence form — split into occasion + congratulation)
+## pharaoh addressing pharaoh [[s7t8u9v0]]
+[[institution-to-institution through human faces]]
+[[| english can't sustain the single-sentence form — split into occasion + congratulation]]
 ```
 
 **Edge cases and open questions:**

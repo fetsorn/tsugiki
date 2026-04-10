@@ -54,59 +54,40 @@ What is needed is not a perfect parser — parsing natural language will always 
 
 The tree model is expressed as Rust types with enforcement at construction time.
 
-**Depth** is a newtype over `u8`. The number of depth levels is a property of the intent, not the system. A letter might have four levels (document, section, paragraph, sentence). A monograph chapter might have five (adding footnotes). A book with parts and subchapters could have seven. The invariant is relative: a child is exactly one level deeper than its parent.
+**Depth** is a newtype over `u8`. Depth counts upward from the sentence level: sentences are always Depth 0, and grouping levels above them increment. A text with sentences grouped only into chapters has two levels (0 and 1). A text with sentences in paragraphs in chapters has three (0, 1, 2). The number of levels is a property of the intent, not the system. The invariant is relative: a child's depth is exactly one less than its parent's.
+
+Fountain section markers map to grouping levels above the sentence: `#` is the highest grouping level in the file, `##` the next, `###` the next. Unmarked action blocks are always Depth 0 (sentences). The number of heading levels used determines the intent's tree height — one `#` plus sentences means height 2, `#` + `##` + sentences means height 3, `#` + `##` + `###` + sentences means height 4 (the maximum Fountain can express).
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Depth(pub u8);
 
 impl Depth {
-    pub const MAX: Depth = Depth(3);
+    /// Whether this is the sentence (leaf) depth.
+    pub fn is_sentence(&self) -> bool {
+        self.0 == 0
+    }
 
     /// The depth of a child node, if this depth can have children.
-    /// Depth 3 (sentence) is always a leaf — returns None.
+    /// Depth 0 (sentence) is always a leaf — returns None.
     pub fn child(&self) -> Option<Depth> {
-        if self.0 < 3 { Some(Depth(self.0 + 1)) } else { None }
+        if self.0 > 0 { Some(Depth(self.0 - 1)) } else { None }
     }
 
     /// Whether this depth can contain the given child depth.
     pub fn can_contain(&self, child: &Depth) -> bool {
-        child.0 == self.0 + 1 && child.0 <= 3
-    }
-
-    /// Whether this is the root depth.
-    pub fn is_root(&self) -> bool {
-        self.0 == 0
-    }
-
-    /// Whether this is the leaf (sentence) depth.
-    pub fn is_leaf(&self) -> bool {
-        self.0 == 3
-    }
-
-    /// Returns the Fountain section marker for this depth, if any.
-    /// Depth 0 → `#`, Depth 1 → `##`, Depth 2 → `###`.
-    /// Depth 3 (sentence) has no marker — it is an action block.
-    pub fn fountain_marker(&self) -> Option<&'static str> {
-        match self.0 {
-            0 => Some("#"),
-            1 => Some("##"),
-            2 => Some("###"),
-            _ => None,
-        }
+        self.0 > 0 && child.0 == self.0 - 1
     }
 }
 ```
 
-Fountain has exactly four levels: `#` (Depth 0), `##` (Depth 1), `###` (Depth 2), and unmarked action blocks (Depth 3). This is a fundamental limit, not a workaround. The deepest level (Depth 3, no hash) is always the sentence — the leaf unit of translation. The shallowest level (Depth 0, `#`) is always the intent root. The two intermediate levels (`##`, `###`) accommodate the text's natural structure: for a letter, section and paragraph; for a monograph chapter, section and paragraph; for a poem, stanza and line.
+Because depth is counted from the sentence, there are no depth gaps to fill. If a text groups sentences directly under chapters with no paragraph level, `##` maps to Depth 1 and action blocks to Depth 0 — no synthetic intermediate nodes needed. The Fountain file is the tree, fully. CSVS containment tablets and Fountain always agree on which nodes exist.
 
 If a text requires more than four levels of structural depth — a book with parts, chapters, sections, paragraphs, and sentences — the translator splits it into separate intents. A book becomes one intent per chapter (or per part, depending on the translator's judgment). This is not a limitation but a discipline: if the rhetorical structure cannot be held in four levels, the scope of the translation unit is too large for one pass.
 
-The system enforces: max depth is 3, child depth = parent depth + 1, and Depth 3 nodes are always leaves.
+**Depth from Fountain markers.** The parser reads the Fountain file and assigns depth based on the heading levels actually present. If the file uses `#`, `##`, and action blocks, it assigns `#` → Depth 2, `##` → Depth 1, action → Depth 0. If the file uses `#`, `##`, `###`, and action blocks, it assigns `#` → Depth 3, `##` → Depth 2, `###` → Depth 1, action → Depth 0. The mapping is determined by counting the distinct heading levels in the file and assigning them top-down.
 
-**Texts with fewer than four natural levels.** A text with only two natural levels (document + sentences) still produces a four-level tree. The intermediate levels (Depth 1 and Depth 2) are synthetic single-child nodes. Synthetic nodes appear in CSVS containment tablets (so the depth invariant holds everywhere) but are omitted from the Fountain file to avoid clutter. The Fountain parser infers synthetic nodes when it encounters a depth gap — e.g., `#` (Depth 0) followed directly by an action block (Depth 3). Synthetic UUIDs are derived deterministically via UUID v5 from the parent UUID and the depth level, so they are stable across re-parses and do not require explicit tracking.
-
-The length of the short ID prefix used in Fountain files is configurable. The default is 8 hex characters (4 bytes). For large intents (hundreds of nodes), a longer prefix reduces collision probability. The length is set once, when `tsugiki decompose` creates the Fountain file (`--short-len N` flag, default 8). All subsequent operations auto-detect the length from the existing Fountain file by reading the first `.` line. No configuration file is needed — the Fountain file itself is the record of the chosen length.
+The length of the short ID prefix used in Fountain files is configurable. The default is 8 hex characters (4 bytes). For large intents (hundreds of nodes), a longer prefix reduces collision probability. The length is set once, when `tsugiki decompose` creates the Fountain file (`--short-len N` flag, default 8). All subsequent operations auto-detect the length from the existing Fountain file by reading the first `[[hex]]` note. No configuration file is needed — the Fountain file itself is the record of the chosen length.
 
 Internally, all data structures and CSVS tablets use full v4 UUIDs. Short IDs are a Fountain serialization concern only, not a core type. The `NodeId` type wraps a full UUID. Truncation happens at the Fountain render boundary; lookup by prefix happens at the Fountain parse boundary.
 
@@ -137,14 +118,14 @@ impl TreeKind for Structure { type Order = Unordered; }
 impl TreeKind for Target    { type Order = Ordered; }
 ```
 
-**Note** is a translator annotation attached to a structure node. Notes from the understand phase and regrow phase are distinguished by a leading `|` inside the parenthetical:
+**Note** is a translator annotation attached to a structure node, written as a Fountain note (`[[text]]`) on its own line. Notes from the understand phase and regrow phase are distinguished by a leading `|`:
 
 ```
-(this node introduces the standard description)
-(| split into two target sentences, second carries the footnote)
+[[this node introduces the standard description]]
+[[| split into two target sentences, second carries the footnote]]
 ```
 
-The first form (no prefix) is an understand-phase note. The second form (`| ` prefix) is a regrow-phase note. The pipe character at position 0 inside a parenthetical is reserved; translator input containing a leading pipe is escaped or rejected.
+The first form (no prefix) is an understand-phase note. The second form (`| ` prefix) is a regrow-phase note. The pipe character at position 0 inside a note is reserved; translator input containing a leading pipe is escaped or rejected. Fountain notes are invisible in standard renderers, which is correct — translator annotations are working material, not delivered text.
 
 ```rust
 pub enum NotePhase {
@@ -158,21 +139,17 @@ pub struct Note {
 }
 ```
 
-**No-collapse rule for single-sentence blocks.** When a block contains only one sentence, the structure tree still has two nodes: one at the block depth and one at the sentence depth. The sentence-level annotation uses the `=` prefix to indicate "same intent as parent":
+**Auto-copy for single-sentence blocks.** When a block contains only one sentence, the structure tree still has two nodes: one at the block depth and one at the sentence depth. The sentence-level node carries the same annotation text as its parent — no special markup. The CLI auto-generates the sentence-level node when `annotate` creates a structure node for a sentence whose parent block has no other children.
 
 ```
-.f3a4b5c6
-## polite supplication
+## polite supplication [[f3a4b5c6]]
 
-.d7e8f9a0
-= polite supplication
+polite supplication [[d7e8f9a0]]
 ```
 
-The `=` prefix at position 0 of a structure annotation means "this sentence's rhetorical intent is identical to the containing block's intent." This preserves the bridge depth-matching invariant: the source sentence (Depth 3) maps to a structure sentence (Depth 3), not to a structure block (Depth 2). The `=` prefix is a third reserved character in annotation space, alongside `|` for regrow-phase notes and `(` for parentheticals.
+This preserves the bridge depth-matching invariant: the source sentence (Depth 0) maps to a structure sentence (Depth 0), not to a structure block (Depth 1). The cost is one extra node per single-sentence block, but the translator never writes it — the tool handles it.
 
-This rule makes every bridge depth-consistent and every intent explicit. The cost is one extra node per single-sentence block. The benefit is that the type system never needs to handle depth mismatches in bridges.
-
-**Open question: consecutive parentheticals in Fountain.** The Fountain spec defines parentheticals as `(text)` on their own line between dialogue lines. Tsugiki uses parentheticals outside dialogue context (attached to structure nodes in action blocks). It is unclear whether Fountain parsers treat two consecutive `(...)` lines as a single parenthetical or two separate ones. This must be tested against the Rust Fountain crates (`fountain-rs`, `rustwell`, `fountain-parser-rs`, `lottie/fount`) during Layer 2 implementation. If parsers merge consecutive parentheticals, we may need a different encoding — possibly a single parenthetical with `|` as an internal phase separator between understand and regrow text.
+**Resolved: notes instead of parentheticals.** By using Fountain notes (`[[text]]`) instead of parentheticals (`(text)`), we avoid the question of how Fountain parsers treat consecutive parentheticals outside dialogue context. Notes can appear anywhere in a Fountain document, multiple consecutive notes are unambiguous, and they are invisible in standard renderers. This also frees parentheticals for any future use that aligns with their standard Fountain role (dialogue direction).
 
 **Node** carries its tree kind as a phantom type parameter and its depth as a runtime value:
 
@@ -205,7 +182,6 @@ impl<T: TreeKind> ContainmentEdge<T> {
                 child: child.uuid,
                 _tree: PhantomData,
             })
-            }
         } else {
             Err(TreeError::InvalidDepth {
                 parent_depth: parent.depth,
@@ -259,14 +235,16 @@ All tree traversal goes through a single trait, implementable by both in-memory 
 ```rust
 pub trait TreeWalk<T: TreeKind> {
     fn root(&self) -> Uuid;
-    fn children(&self, node: Uuid) -> Result<Vec<Uuid>, TreeError>;
+    fn children(&self, node: Uuid) -> Result<Box<dyn Iterator<Item = Uuid> + '_>, TreeError>;
     fn parent(&self, node: Uuid) -> Result<Option<Uuid>, TreeError>;
     fn depth(&self, node: Uuid) -> Result<Depth, TreeError>;
     fn content(&self, node: Uuid) -> Result<Option<String>, TreeError>;
     fn next_sibling(&self, node: Uuid) -> Result<Option<Uuid>, TreeError>;
-    fn leaves(&self) -> Result<Vec<Uuid>, TreeError>;
+    fn leaves(&self) -> Result<Box<dyn Iterator<Item = Uuid> + '_>, TreeError>;
 }
 ```
+
+Boxed iterators are the pragmatic choice for trait-object compatibility. The allocation is negligible at translation scale. Alternatives considered: associated types with GATs (zero-cost but prevents trait objects), callback/visitor pattern (no allocation but less composable), SmallVec (stack-allocated for typical branching factors). Boxed iterators keep the API ergonomic and composable.
 
 **In-memory implementation** (`MemTree<T>`) holds `HashMap`s of nodes, children, and content. Used in tests and for small trees.
 
@@ -274,8 +252,8 @@ pub trait TreeWalk<T: TreeKind> {
 
 - `children(uuid)`: grep the CSV for lines starting with the UUID.
 - `parent(uuid)`: grep the CSV for lines ending with the UUID.
-- `content(uuid)`: grep the Fountain file for `.{short_uuid}`, read the next non-blank line.
-- `depth(uuid)`: grep the Fountain file for `.{short_uuid}`, check if the next line starts with `#`, `##`, `###`, or none.
+- `content(uuid)`: grep the Fountain file for `[[{short_uuid}]]`, extract the text from that line (before the note) or the heading text.
+- `depth(uuid)`: grep the Fountain file for `[[{short_uuid}]]`, check if the line starts with `#`, `##`, `###`, or none.
 - `next_sibling(uuid)`: call `parent(uuid)`, then `children(parent)`, find position, return next.
 
 No method loads the entire file. Each is O(file_size) in the worst case for a grep, but operates on a single file and reads only the matched lines.
@@ -284,15 +262,17 @@ No method loads the entire file. Each is O(file_size) in the worst case for a gr
 
 ```rust
 pub trait BridgeWalk<From: TreeKind, To: TreeKind> {
-    fn bridge_target(&self, from: Uuid) -> Result<Option<Uuid>, TreeError>;
-    fn bridge_source(&self, to: Uuid) -> Result<Option<Uuid>, TreeError>;
+    fn bridge_targets(&self, from: Uuid) -> Result<Vec<Uuid>, TreeError>;
+    fn bridge_sources(&self, to: Uuid) -> Result<Vec<Uuid>, TreeError>;
     fn is_mapped(&self, from: Uuid) -> Result<bool, TreeError>;
     fn unmapped_leaves(
         &self,
         tree: &dyn TreeWalk<From>,
-    ) -> Result<Vec<Uuid>, TreeError>;
+    ) -> Result<Box<dyn Iterator<Item = Uuid> + '_>, TreeError>;
 }
 ```
+
+Bridge methods return `Vec` because a single structure node can produce multiple target sentences (1:N in `structure-target.csv`), and theoretically multiple source sentences could collapse into one structure node (N:1 in `source-structure.csv`). The cong example already demonstrates the 1:N case: structure node `adc3ff3f` ("pharaoh addressing pharaoh") bridges to two target sentences.
 
 **Streaming implementation** (`CsvBridgeWalk<From, To>`) holds the path to the bridge CSV (e.g., `source-structure.csv`). Each method is a grep.
 
@@ -332,7 +312,13 @@ impl<T: TreeKind> Cursor<T> {
 }
 ```
 
-The cursor is serializable as a single UUID. A new session reads it from a file (e.g., `.cursor`) and resumes.
+The cursor is serializable as a single UUID. Session state is stored in a CSVS tablet `phase-cursor.csv` within the intent's dataset. A single row records the current phase and the UUID of the current node:
+
+```
+understand,cfb0b898-full-uuid-here
+```
+
+When the phase advances (understand → regrow), the row updates. This keeps session state in the same dataset as all other intent data — queryable with panrec, version-controlled with the intent, no ad-hoc dotfiles.
 
 ### Parser contract
 
@@ -401,12 +387,12 @@ The following properties are tested with `proptest` using randomly generated tre
 Random tree generation respects the depth ordering:
 
 ```rust
-fn arb_tree<T: TreeKind>(max_depth: u8) -> impl Strategy<Value = MemTree<T>> {
-    // Generate a root at Depth(0).
-    // For each depth level 1..max_depth, generate children (1..8 branching factor).
-    // Leaf nodes are at depth max_depth, optionally with children at max_depth+1.
+fn arb_tree<T: TreeKind>(height: u8) -> impl Strategy<Value = MemTree<T>> {
+    // Generate a root at Depth(height - 1).
+    // For each depth level going down to 0, generate children (1..8 branching factor).
+    // Leaf nodes are at Depth(0) — always sentences.
     // Content is arbitrary non-empty strings.
-    // max_depth is itself a parameter (3..7) to test varying tree shapes.
+    // height is a parameter (2..5) to test varying tree shapes (2 = chapter+sentences, 4 = max Fountain).
 }
 ```
 
@@ -414,16 +400,19 @@ fn arb_tree<T: TreeKind>(max_depth: u8) -> impl Strategy<Value = MemTree<T>> {
 
 The CLI is a thin wrapper around the trait methods:
 
-| Command                          | Implementation                           | Reads                        | Writes    |
-|----------------------------------|------------------------------------------|------------------------------|-----------|
-| `tsugiki next <uuid>`            | `cursor.advance()`                       | grep CSV                     | nothing   |
-| `tsugiki read <uuid>`            | `tree.content()`                         | grep fountain                | nothing   |
-| `tsugiki mapped <uuid>`          | `bridge.is_mapped()`                     | grep bridge CSV              | nothing   |
-| `tsugiki context <uuid>`         | `tree.parent()` × N                      | grep CSV + fountain          | nothing   |
-| `tsugiki annotate <uuid> <text>` | construct node + edges, validate, append | nothing                      | append ×3 |
-| `tsugiki status`                 | `bridge.unmapped_leaves()`               | grep bridge CSV + source CSV | nothing   |
-| `tsugiki validate`               | `validate_parse()` on all trees          | read all CSVs                | nothing   |
-| `tsugiki resume`                 | read cursor file                         | 1 file                       | nothing   |
+| Command                          | Implementation                           | Reads                        | Writes          |
+|----------------------------------|------------------------------------------|------------------------------|-----------------|
+| `tsugiki next <uuid>`            | `cursor.advance()`                       | grep CSV                     | nothing         |
+| `tsugiki read <uuid>`            | `tree.content()`                         | grep fountain                | nothing         |
+| `tsugiki mapped <uuid>`          | `bridge.is_mapped()`                     | grep bridge CSV              | nothing         |
+| `tsugiki context <uuid>`         | `tree.parent()` × N                      | grep CSV + fountain          | nothing         |
+| `tsugiki annotate <uuid> <text>` | construct node + edges, validate, append | nothing                      | append ×3       |
+| `tsugiki regrow <uuid> <text>`   | construct target node + edges, append    | grep structure + bridge CSV  | append ×3       |
+| `tsugiki regrow-next`            | advance cursor in structure tree         | grep structure-target CSV    | phase-cursor    |
+| `tsugiki render <tree>`          | strip Fountain to clean markdown         | read fountain                | write .md       |
+| `tsugiki status`                 | `bridge.unmapped_leaves()`               | grep bridge CSV + source CSV | nothing         |
+| `tsugiki validate`               | `validate_parse()` on all trees          | read all CSVs                | nothing         |
+| `tsugiki resume`                 | read phase-cursor tablet                 | grep phase-cursor CSV        | nothing         |
 
 The `annotate` command is the only write operation. It constructs a `Node<Structure>`, a `ContainmentEdge<Structure>`, and a `BridgeEdge<Source, Structure>` through the smart constructors, which validate depth matching. Then it appends one line to `structure.fountain` (after the paragraph heading — this is the one non-append operation, implemented as a streaming insertion), one line to `structure-child.csv`, and one line to `source-structure.csv`.
 
@@ -437,8 +426,8 @@ fn insert_after_paragraph(
     target_uuid: &str,
     new_lines: Vec<String>,
 ) -> impl Iterator<Item = String> {
-    // Emit all lines until `.{target_uuid}` is found.
-    // Emit the UUID line, the heading line, the blank line.
+    // Emit all lines until `[[{target_uuid}]]` is found (in heading or action line).
+    // Emit that line and the following blank line.
     // Emit new_lines.
     // Emit remaining lines.
 }
@@ -452,7 +441,7 @@ This reads the fountain file line by line, writes to a temporary file, then repl
 - Every tree operation goes through a validated constructor. Depth mismatches, malformed edges, and invalid bridges become compile-time or construction-time errors, not silent data corruption.
 - The `TreeWalk` trait abstracts over storage. Tests use `MemTree`; the CLI uses `FountainWalk`. Both satisfy the same properties, verified by proptest.
 - Parsers become pluggable modules that produce a `ParseResult`. The system validates the result, flags warnings, and requires human approval for ambiguous cases. Parse errors are caught before they enter the tree, not after they propagate through three trees and five tablets.
-- Session continuity reduces to persisting a single UUID. A cursor file (or even a command-line argument) is sufficient to resume work.
+- Session continuity reduces to persisting a single UUID in a `phase-cursor.csv` CSVS tablet. No ad-hoc dotfiles; session state lives in the same dataset as all other intent data.
 - The streaming design means the CLI never loads a full file. Operations are proportional to the number of matched lines, not the total file size. This matters for book-length translations with thousands of nodes.
 - Property-based tests provide confidence that the invariants hold for arbitrary trees, not just the specific trees we have tested manually. Regressions in parser or tree construction code are caught automatically.
 - The type system prevents a class of errors that are currently possible: passing a source UUID to a function expecting a target UUID, constructing a bridge between source and target directly (bypassing structure), creating a containment edge between nodes of incompatible depths.

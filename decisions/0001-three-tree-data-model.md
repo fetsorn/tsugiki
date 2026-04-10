@@ -52,10 +52,9 @@ Each tree is stored as a single Fountain file: `source.fountain`, `structure.fou
 
 Fountain tokens encode tree structure:
 
-- **Section markers** (`#`, `##`, `###`) encode depth levels (document, chapter, paragraph, sentence).
-- **Forced scene headings** (`.NODE uuid`) mark individual nodes with their identifiers.
+- **Section markers** (`#`, `##`, `###`) encode depth levels (document, chapter, paragraph, sentence). This is standard Fountain usage.
+- **Notes** (`[[text]]`) serve two purposes: `[[hex-id]]` at the end of a heading or action line identifies the node's UUID; standalone `[[text]]` lines hold translator annotations (rhetorical role, tone, cultural notes). Notes are invisible in standard Fountain renderers, which is correct — UUIDs and translator commentary are not part of the delivered text.
 - **Action blocks** hold the prose content of each node — the actual sentences of the source text, the shortform structure annotations, or the translated sentences.
-- **Parentheticals** annotate how a node functions, especially in the structure tree (e.g., rhetorical role, tone, register).
 - **File order** is the sibling sequence for source and target trees. For the structure tree, file order is a convenience, not a semantic relationship.
 
 Each Fountain file reads as prose in structural context: you can open `source.fountain` and read the original text with its natural hierarchy visible. You can open `structure.fountain` and read the rhetorical script of the text. You can open `target.fountain` and read the translation as a standalone document.

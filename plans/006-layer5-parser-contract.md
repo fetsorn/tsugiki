@@ -115,12 +115,12 @@ pub enum FootnoteStyle {
 }
 ```
 
-Steps (depth assignment is intent-specific, not fixed — see `ParseConfig`):
-1. Split on headings → depth 1 nodes (sections). If no headings, the whole document is one depth-0 root with direct children.
-2. Split sections on blank lines → depth 2 nodes (paragraphs).
-3. Split paragraphs on sentence boundaries (language-specific) → depth 3 nodes (sentences).
-4. Optionally match footnote markers to footnote definitions → depth 4 nodes (footnote children of sentences). Not all intents have footnotes.
-5. Assign UUIDs. Build `MemTree<Source>` with containment edges. Actual max depth depends on the source text.
+Steps (depth counts from sentence level — Depth 0 is always sentences):
+1. Split on headings → determine the tree height from the number of heading levels used. Headings at the shallowest level get the highest depth.
+2. Split sections on blank lines → intermediate depth nodes (paragraphs, if the text has them).
+3. Split paragraphs on sentence boundaries (language-specific) → Depth 0 nodes (sentences, always leaves).
+4. Footnotes are not tree children — they are tracked as a separate `source-footnote.csv` bridge tablet linking sentence UUIDs to footnote UUIDs. Footnote content lives inline in the sentence's action block in Fountain (e.g., as `[^N]` markers). This avoids needing a depth level below sentences.
+5. Assign UUIDs. Build `MemTree<Source>` with containment edges. Tree height depends on the source text.
 6. Collect warnings for every ambiguous decision.
 
 ## Sentence splitter trait (`sentence.rs`)

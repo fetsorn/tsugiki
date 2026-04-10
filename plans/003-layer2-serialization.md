@@ -52,9 +52,11 @@ State machine:
 3. Next line(s): if `(...)` → parenthetical note. Check for leading `| ` to distinguish regrow from understand. Multiple consecutive parentheticals may occur. Else → part of text (multi-line action).
 4. Blank line → finalize node.
 
-Depth determines parent: maintain a stack of `(Depth, NodeId)`. For nodes with a heading marker, depth is known from the marker. For action-block nodes (Depth 3), depth is the sentence level — always a leaf. New node pops stack until top has a strictly lower depth, then becomes child of top.
+**Depth assignment.** The parser first scans the file to determine the set of distinct heading levels used (e.g., `#` and `##`, or `#` and `##` and `###`). The deepest heading level gets the highest depth, action blocks always get Depth 0. For example, if the file uses `#` and `##`: `#` → Depth 2, `##` → Depth 1, action → Depth 0. If the file uses `#`, `##`, `###`: `#` → Depth 3, `##` → Depth 2, `###` → Depth 1, action → Depth 0.
 
-**Depth gaps.** When the parser sees a depth gap (e.g., `#` at Depth 0 followed by an action block at Depth 3), it infers synthetic single-child nodes at the skipped depths. Synthetic UUIDs are derived deterministically via UUID v5 from the parent UUID and the depth level, so they are stable across re-parses. Synthetic nodes appear in CSVS containment tablets but not in Fountain.
+Depth determines parent: maintain a stack of `(Depth, NodeId)`. New node pops stack until top has a strictly higher depth, then becomes child of top.
+
+Because depth is assigned based on the heading levels actually present (not on the number of `#` characters), there are no depth gaps and no synthetic nodes. If a file uses only `#` and action blocks, `#` becomes Depth 1 and action blocks become Depth 0 — `can_contain(1, 0)` holds. If a file uses `#`, `##`, and action blocks, they become Depth 2, Depth 1, Depth 0 respectively. The Fountain file and CSVS always agree on which nodes exist.
 
 **Open question**: how Fountain parsers handle consecutive `(...)` lines — merged or separate? Must be tested against Rust Fountain crates during this layer. If merged, fall back to single parenthetical with `|` as internal separator.
 

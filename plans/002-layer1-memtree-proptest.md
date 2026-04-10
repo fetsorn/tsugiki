@@ -51,7 +51,7 @@ pub struct MemTree<T> {
 pub trait TreeWalk<T> {
     fn root(&self) -> Option<NodeId>;
     fn node(&self, id: &NodeId) -> Option<&Node<T>>;
-    fn children(&self, id: &NodeId) -> Vec<NodeId>;
+    fn children(&self, id: &NodeId) -> Box<dyn Iterator<Item = NodeId> + '_>;
     fn parent(&self, id: &NodeId) -> Option<NodeId>;
 }
 ```
@@ -62,26 +62,26 @@ pub trait TreeWalk<T> {
 
 ```rust
 pub struct BridgeSet<From, To> {
-    forward: HashMap<NodeId, NodeId>,  // from → to
-    reverse: HashMap<NodeId, NodeId>,  // to → from
+    forward: HashMap<NodeId, Vec<NodeId>>,  // from → [to, ...]
+    reverse: HashMap<NodeId, Vec<NodeId>>,  // to → [from, ...]
 }
 ```
 
-- `add(from: NodeId, to: NodeId) -> Result<()>` — checks no duplicate mapping.
-- `get_target(&self, from: &NodeId) -> Option<&NodeId>`
-- `get_source(&self, to: &NodeId) -> Option<&NodeId>`
+- `add(from: NodeId, to: NodeId) -> Result<()>` — checks no duplicate pair.
+- `get_targets(&self, from: &NodeId) -> &[NodeId]` — returns all target nodes for a source node (1:N for structure→target).
+- `get_sources(&self, to: &NodeId) -> &[NodeId]` — returns all source nodes for a target node (N:1 for source→structure).
 
 ## Proptest strategies (properties.rs)
 
 ### Arbitrary tree generator
 
 Strategy that builds a valid `MemTree<Source>` by:
-1. Generate `max_depth: u8` in range `3..7` (varying tree shapes).
-2. Generate root with `Depth(0)`.
-3. For each existing node, optionally add children at depth + 1.
-4. Recurse until `max_depth` reached or random stop.
+1. Generate `height: u8` in range `2..5` (varying tree shapes — 2 is chapter+sentences, 4 is max Fountain).
+2. Generate root with `Depth(height - 1)`.
+3. For each existing node, optionally add children at depth - 1.
+4. Recurse until Depth 0 (sentence level) reached.
 
-Parameters: max_depth (3–7), max nodes (10–100), branching factor (1–5).
+Parameters: height (2–4), max nodes (10–100), branching factor (1–5).
 
 ### 7 properties
 
