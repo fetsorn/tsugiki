@@ -27,32 +27,32 @@ Add `proptest` as a dev-dependency.
 
 ```rust
 pub struct MemTree<T> {
-    nodes: HashMap<ShortId, Node<T>>,
-    children: HashMap<ShortId, Vec<ShortId>>,  // ordered for Source/Target
-    parent: HashMap<ShortId, ShortId>,
-    root: Option<ShortId>,
+    nodes: HashMap<NodeId, Node<T>>,
+    children: HashMap<NodeId, Vec<NodeId>>,  // ordered for Source/Target
+    parent: HashMap<NodeId, NodeId>,
+    root: Option<NodeId>,
 }
 ```
 
 ### Operations
 
 - `new() -> Self`
-- `add_root(node: Node<T>) -> Result<()>` — must be `Depth::Document`, tree must be empty.
-- `add_child(parent: ShortId, node: Node<T>) -> Result<()>` — checks `parent.depth.can_contain(node.depth)`, checks parent exists, checks no duplicate id.
-- `get(&self, id: &ShortId) -> Option<&Node<T>>`
-- `children(&self, id: &ShortId) -> &[ShortId]`
-- `parent(&self, id: &ShortId) -> Option<&ShortId>`
+- `add_root(node: Node<T>) -> Result<()>` — must be `Depth(0)`, tree must be empty.
+- `add_child(parent: NodeId, node: Node<T>) -> Result<()>` — checks `parent.depth.can_contain(node.depth)`, checks parent exists, checks no duplicate id.
+- `get(&self, id: &NodeId) -> Option<&Node<T>>`
+- `children(&self, id: &NodeId) -> &[NodeId]`
+- `parent(&self, id: &NodeId) -> Option<&NodeId>`
 - `walk_depth_first(&self) -> impl Iterator<Item = &Node<T>>` — pre-order DFS.
-- `leaves(&self) -> impl Iterator<Item = &Node<T>>` — all `Depth::Leaf` nodes.
+- `leaves(&self) -> impl Iterator<Item = &Node<T>>` — all nodes with no children.
 
 ### `TreeWalk` trait
 
 ```rust
 pub trait TreeWalk<T> {
-    fn root(&self) -> Option<ShortId>;
-    fn node(&self, id: &ShortId) -> Option<&Node<T>>;
-    fn children(&self, id: &ShortId) -> Vec<ShortId>;
-    fn parent(&self, id: &ShortId) -> Option<ShortId>;
+    fn root(&self) -> Option<NodeId>;
+    fn node(&self, id: &NodeId) -> Option<&Node<T>>;
+    fn children(&self, id: &NodeId) -> Vec<NodeId>;
+    fn parent(&self, id: &NodeId) -> Option<NodeId>;
 }
 ```
 
@@ -62,25 +62,26 @@ pub trait TreeWalk<T> {
 
 ```rust
 pub struct BridgeSet<From, To> {
-    forward: HashMap<ShortId, ShortId>,  // from → to
-    reverse: HashMap<ShortId, ShortId>,  // to → from
+    forward: HashMap<NodeId, NodeId>,  // from → to
+    reverse: HashMap<NodeId, NodeId>,  // to → from
 }
 ```
 
-- `add(from: ShortId, to: ShortId) -> Result<()>` — checks no duplicate mapping.
-- `get_target(&self, from: &ShortId) -> Option<&ShortId>`
-- `get_source(&self, to: &ShortId) -> Option<&ShortId>`
+- `add(from: NodeId, to: NodeId) -> Result<()>` — checks no duplicate mapping.
+- `get_target(&self, from: &NodeId) -> Option<&NodeId>`
+- `get_source(&self, to: &NodeId) -> Option<&NodeId>`
 
 ## Proptest strategies (properties.rs)
 
 ### Arbitrary tree generator
 
 Strategy that builds a valid `MemTree<Source>` by:
-1. Generate root with `Depth::Document`.
-2. For each existing node, optionally add children with valid depth (one level deeper).
-3. Recurse until `Depth::Leaf` or random stop.
+1. Generate `max_depth: u8` in range `3..7` (varying tree shapes).
+2. Generate root with `Depth(0)`.
+3. For each existing node, optionally add children at depth + 1.
+4. Recurse until `max_depth` reached or random stop.
 
-Parameters: max nodes (10–100), branching factor (1–5).
+Parameters: max_depth (3–7), max nodes (10–100), branching factor (1–5).
 
 ### 7 properties
 
@@ -97,7 +98,7 @@ Properties 5–7 are written as `#[ignore]` stubs that will be un-ignored when t
 ## Tests
 
 - Unit test: build a small tree manually, verify walk order.
-- Unit test: attempt invalid depth (Section under Leaf), expect error.
+- Unit test: attempt invalid depth (Depth(0) under Depth(3)), expect error.
 - Unit test: bridge set rejects duplicate.
 - Proptest: properties 1–4 with generated trees (100 cases each).
 - Proptest: two generated trees with random bridge, verify consistency.

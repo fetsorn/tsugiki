@@ -13,7 +13,7 @@ The three-tree data model (ADR-0001) and the translation workflow (ADR-0002) des
 
 The three trees have structural invariants that are never enforced by code:
 
-- Each tree has a fixed depth ordering: document → section → paragraph → sentence → footnote. A child's depth must be exactly one level deeper than its parent's.
+- Each tree has a depth ordering where a child's depth is exactly one level deeper than its parent's. The number of levels varies by intent — a letter might have four (document, section, paragraph, sentence), a monograph chapter five (adding footnotes), a book seven (adding parts and subchapters). The system enforces the relative invariant (child = parent + 1), not a fixed set of named levels.
 - Cross-tree bridges (source→structure, structure→target) must connect nodes of the same depth. A sentence-level source node maps to a sentence-level structure node, never to a section-level one.
 - Source and target trees have ordered siblings (file order matters). The structure tree has unordered siblings (file order is convenience).
 - Every source leaf should eventually have exactly one structure bridge. Every structure leaf should have zero or more target bridges.
@@ -54,43 +54,61 @@ What is needed is not a perfect parser — parsing natural language will always 
 
 The tree model is expressed as Rust types with enforcement at construction time.
 
-**Depth** is a closed enum representing the fixed depth levels of all three trees:
+**Depth** is a newtype over `u8`. The number of depth levels is a property of the intent, not the system. A letter might have four levels (document, section, paragraph, sentence). A monograph chapter might have five (adding footnotes). A book with parts and subchapters could have seven. The invariant is relative: a child is exactly one level deeper than its parent.
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Depth {
-    Document,
-    Section,
-    Paragraph,
-    Sentence,
-    Footnote,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Depth(pub u8);
 
 impl Depth {
-    /// Returns the expected depth of a child node, or None if this depth has no children.
-    pub fn child_depth(&self) -> Option<Depth> {
-        match self {
-            Depth::Document  => Some(Depth::Section),
-            Depth::Section   => Some(Depth::Paragraph),
-            Depth::Paragraph => Some(Depth::Sentence),
-            Depth::Sentence  => Some(Depth::Footnote),
-            Depth::Footnote  => None,
-        }
+    pub const MAX: Depth = Depth(3);
+
+    /// The depth of a child node, if this depth can have children.
+    /// Depth 3 (sentence) is always a leaf — returns None.
+    pub fn child(&self) -> Option<Depth> {
+        if self.0 < 3 { Some(Depth(self.0 + 1)) } else { None }
+    }
+
+    /// Whether this depth can contain the given child depth.
+    pub fn can_contain(&self, child: &Depth) -> bool {
+        child.0 == self.0 + 1 && child.0 <= 3
+    }
+
+    /// Whether this is the root depth.
+    pub fn is_root(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether this is the leaf (sentence) depth.
+    pub fn is_leaf(&self) -> bool {
+        self.0 == 3
     }
 
     /// Returns the Fountain section marker for this depth, if any.
-    /// Leaf nodes (Sentence, Footnote) have no section marker.
+    /// Depth 0 → `#`, Depth 1 → `##`, Depth 2 → `###`.
+    /// Depth 3 (sentence) has no marker — it is an action block.
     pub fn fountain_marker(&self) -> Option<&'static str> {
-        match self {
-            Depth::Document  => Some("#"),
-            Depth::Section   => Some("##"),
-            Depth::Paragraph => Some("###"),
-            Depth::Sentence  => None,
-            Depth::Footnote  => None,
+        match self.0 {
+            0 => Some("#"),
+            1 => Some("##"),
+            2 => Some("###"),
+            _ => None,
         }
     }
 }
 ```
+
+Fountain has exactly four levels: `#` (Depth 0), `##` (Depth 1), `###` (Depth 2), and unmarked action blocks (Depth 3). This is a fundamental limit, not a workaround. The deepest level (Depth 3, no hash) is always the sentence — the leaf unit of translation. The shallowest level (Depth 0, `#`) is always the intent root. The two intermediate levels (`##`, `###`) accommodate the text's natural structure: for a letter, section and paragraph; for a monograph chapter, section and paragraph; for a poem, stanza and line.
+
+If a text requires more than four levels of structural depth — a book with parts, chapters, sections, paragraphs, and sentences — the translator splits it into separate intents. A book becomes one intent per chapter (or per part, depending on the translator's judgment). This is not a limitation but a discipline: if the rhetorical structure cannot be held in four levels, the scope of the translation unit is too large for one pass.
+
+The system enforces: max depth is 3, child depth = parent depth + 1, and Depth 3 nodes are always leaves.
+
+**Texts with fewer than four natural levels.** A text with only two natural levels (document + sentences) still produces a four-level tree. The intermediate levels (Depth 1 and Depth 2) are synthetic single-child nodes. Synthetic nodes appear in CSVS containment tablets (so the depth invariant holds everywhere) but are omitted from the Fountain file to avoid clutter. The Fountain parser infers synthetic nodes when it encounters a depth gap — e.g., `#` (Depth 0) followed directly by an action block (Depth 3). Synthetic UUIDs are derived deterministically via UUID v5 from the parent UUID and the depth level, so they are stable across re-parses and do not require explicit tracking.
+
+The length of the short ID prefix used in Fountain files is configurable. The default is 8 hex characters (4 bytes). For large intents (hundreds of nodes), a longer prefix reduces collision probability. The length is set once, when `tsugiki decompose` creates the Fountain file (`--short-len N` flag, default 8). All subsequent operations auto-detect the length from the existing Fountain file by reading the first `.` line. No configuration file is needed — the Fountain file itself is the record of the chosen length.
+
+Internally, all data structures and CSVS tablets use full v4 UUIDs. Short IDs are a Fountain serialization concern only, not a core type. The `NodeId` type wraps a full UUID. Truncation happens at the Fountain render boundary; lookup by prefix happens at the Fountain parse boundary.
 
 **Tree kind** is encoded as zero-sized types (phantom types) so the compiler distinguishes source, structure, and target at the type level:
 
@@ -140,6 +158,20 @@ pub struct Note {
 }
 ```
 
+**No-collapse rule for single-sentence blocks.** When a block contains only one sentence, the structure tree still has two nodes: one at the block depth and one at the sentence depth. The sentence-level annotation uses the `=` prefix to indicate "same intent as parent":
+
+```
+.f3a4b5c6
+## polite supplication
+
+.d7e8f9a0
+= polite supplication
+```
+
+The `=` prefix at position 0 of a structure annotation means "this sentence's rhetorical intent is identical to the containing block's intent." This preserves the bridge depth-matching invariant: the source sentence (Depth 3) maps to a structure sentence (Depth 3), not to a structure block (Depth 2). The `=` prefix is a third reserved character in annotation space, alongside `|` for regrow-phase notes and `(` for parentheticals.
+
+This rule makes every bridge depth-consistent and every intent explicit. The cost is one extra node per single-sentence block. The benefit is that the type system never needs to handle depth mismatches in bridges.
+
 **Open question: consecutive parentheticals in Fountain.** The Fountain spec defines parentheticals as `(text)` on their own line between dialogue lines. Tsugiki uses parentheticals outside dialogue context (attached to structure nodes in action blocks). It is unclear whether Fountain parsers treat two consecutive `(...)` lines as a single parenthetical or two separate ones. This must be tested against the Rust Fountain crates (`fountain-rs`, `rustwell`, `fountain-parser-rs`, `lottie/fount`) during Layer 2 implementation. If parsers merge consecutive parentheticals, we may need a different encoding — possibly a single parenthetical with `|` as an internal phase separator between understand and regrow text.
 
 **Node** carries its tree kind as a phantom type parameter and its depth as a runtime value:
@@ -167,18 +199,18 @@ impl<T: TreeKind> ContainmentEdge<T> {
         parent: &Node<T>,
         child: &Node<T>,
     ) -> Result<Self, TreeError> {
-        match parent.depth.child_depth() {
-            Some(expected) if expected == child.depth => {
-                Ok(ContainmentEdge {
-                    parent: parent.uuid,
-                    child: child.uuid,
-                    _tree: PhantomData,
-                })
+        if parent.depth.can_contain(&child.depth) {
+            Ok(ContainmentEdge {
+                parent: parent.uuid,
+                child: child.uuid,
+                _tree: PhantomData,
+            })
             }
-            _ => Err(TreeError::InvalidDepth {
+        } else {
+            Err(TreeError::InvalidDepth {
                 parent_depth: parent.depth,
                 child_depth: child.depth,
-            }),
+            })
         }
     }
 }
@@ -358,7 +390,7 @@ pub struct ParseApproval {
 
 The following properties are tested with `proptest` using randomly generated trees:
 
-1. **Depth monotonicity**: for every containment edge, child depth equals `parent.depth.child_depth().unwrap()`.
+1. **Depth monotonicity**: for every containment edge, `parent.depth.can_contain(&child.depth)` is true (i.e., child depth = parent depth + 1).
 2. **Single parent**: every non-root node has exactly one parent.
 3. **Bridge depth consistency**: for every bridge edge, `from.depth == to.depth`.
 4. **Leaf coverage** (after Phase 2): every source leaf has a bridge to a structure node.
@@ -369,13 +401,12 @@ The following properties are tested with `proptest` using randomly generated tre
 Random tree generation respects the depth ordering:
 
 ```rust
-fn arb_tree<T: TreeKind>() -> impl Strategy<Value = MemTree<T>> {
-    // Generate a document root.
-    // For each section count (1..8), generate sections.
-    // For each section, generate paragraphs (1..12).
-    // For each paragraph, generate sentences (1..10).
-    // For each sentence, optionally generate footnotes (0..3).
+fn arb_tree<T: TreeKind>(max_depth: u8) -> impl Strategy<Value = MemTree<T>> {
+    // Generate a root at Depth(0).
+    // For each depth level 1..max_depth, generate children (1..8 branching factor).
+    // Leaf nodes are at depth max_depth, optionally with children at max_depth+1.
     // Content is arbitrary non-empty strings.
+    // max_depth is itself a parameter (3..7) to test varying tree shapes.
 }
 ```
 

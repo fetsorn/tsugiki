@@ -36,10 +36,10 @@ Add csvs-rs as a dependency (path or git).
 `render_fountain<T>(tree: &MemTree<T>) -> String`
 
 Walk the tree DFS. For each node:
-- Emit `.{short_id}` on its own line.
-- If depth is not Leaf, emit depth marker (`#`, `##`, `###`) followed by space and text on next line.
-- Else emit text as action block (plain line).
-- If node has a note, emit `({note})` on next line.
+- Emit `.{node_id.prefix(short_len)}` on its own line. `short_len` is a parameter to the render function (default 8).
+- If `depth.fountain_marker()` returns `Some(marker)` (depths 0–2), emit marker + space + text on next line.
+- Else emit text as action block (plain line). Depth is implicit from containment.
+- For each note: emit `({note.text})` if understand, `(| {note.text})` if regrow.
 - Blank line after each node.
 
 ### Parse (`fountain/parse.rs`)
@@ -47,12 +47,16 @@ Walk the tree DFS. For each node:
 `parse_fountain<T>(input: &str) -> Result<(MemTree<T>, Vec<ParseWarning>)>`
 
 State machine:
-1. Line starting with `.` and exactly 8 hex chars → begin new node, capture ShortId.
-2. Next non-blank line: if starts with `#` → extract depth and text. Else → Leaf, text is this line.
-3. Next line: if `(...)` → parenthetical note. Else → part of text (multi-line action).
+1. Line starting with `.` followed by hex chars → begin new node, capture prefix. Length is auto-detected from the first `.` line in the file.
+2. Next non-blank line: if starts with `#` → count `#` characters to get depth (0, 1, or 2). Extract text after marker. Else → action block, depth is determined from containment (see below).
+3. Next line(s): if `(...)` → parenthetical note. Check for leading `| ` to distinguish regrow from understand. Multiple consecutive parentheticals may occur. Else → part of text (multi-line action).
 4. Blank line → finalize node.
 
-Depth determines parent: maintain a stack of `(Depth, ShortId)`. New node pops stack until top has lower depth, then becomes child of top.
+Depth determines parent: maintain a stack of `(Depth, NodeId)`. For nodes with a heading marker, depth is known from the marker. For action-block nodes (Depth 3), depth is the sentence level — always a leaf. New node pops stack until top has a strictly lower depth, then becomes child of top.
+
+**Depth gaps.** When the parser sees a depth gap (e.g., `#` at Depth 0 followed by an action block at Depth 3), it infers synthetic single-child nodes at the skipped depths. Synthetic UUIDs are derived deterministically via UUID v5 from the parent UUID and the depth level, so they are stable across re-parses. Synthetic nodes appear in CSVS containment tablets but not in Fountain.
+
+**Open question**: how Fountain parsers handle consecutive `(...)` lines — merged or separate? Must be tested against Rust Fountain crates during this layer. If merged, fall back to single parenthetical with `|` as internal separator.
 
 Warnings:
 - `ParseWarning::AmbiguousDepth` — heading marker count doesn't match expected nesting.
@@ -99,11 +103,11 @@ pub fn write_bridge<F, T>(dataset: &Dataset, bridges: &BridgeSet<F, T>, from_col
     -> Result<()>
 ```
 
-### Short-to-full UUID mapping
+### Prefix-to-full UUID mapping
 
-CSVS stores full UUIDs. Fountain uses 8-char short ids. The serialization layer must maintain a `HashMap<ShortId, NodeId>` built from the CSVS tablets, and use it when going Fountain → CSVS.
+CSVS stores full UUIDs. Fountain uses short prefixes (length auto-detected from file, default 8 hex chars). The serialization layer maintains a `HashMap<String, NodeId>` mapping prefixes to full UUIDs, built from the CSVS tablets on first access.
 
-When a new node is created (e.g., during understand phase), generate a full v4 UUID and register both short and full forms.
+When a new node is created (e.g., during understand phase), generate a full v4 UUID. The Fountain renderer truncates it to the file's prefix length. If the prefix collides with an existing node, report an error — the intent needs a longer prefix length (re-run `decompose` with `--short-len`).
 
 ### Roundtrip property
 

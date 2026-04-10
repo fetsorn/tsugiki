@@ -35,7 +35,7 @@ tsugiki-cli/
 
 ```rust
 pub struct Cursor {
-    pub current: ShortId,
+    pub current: NodeId,
     pub phase: Phase,
 }
 
@@ -49,12 +49,12 @@ pub enum Phase {
 Persisted as `.tsugiki-cursor` file in the intent directory:
 ```
 phase=understand
-current=cfb0b898
+current=cfb0b898-full-uuid-here
 ```
 
 - `Cursor::load(intent_dir) -> Result<Option<Cursor>>`
 - `Cursor::save(&self, intent_dir) -> Result<()>`
-- `Cursor::advance(&mut self, tree: &impl TreeWalk<T>) -> Option<ShortId>` — move to next unmapped node.
+- `Cursor::advance(&mut self, tree: &impl TreeWalk<T>) -> Option<NodeId>` — move to next unmapped node.
 
 ### Advance logic for Understand phase
 
@@ -67,11 +67,19 @@ current=cfb0b898
 
 Same pattern but walks structure tree and checks `structure-target.csv`.
 
+## Index tablet
+
+`source-line.csv` (and `structure-line.csv`, `target-line.csv`) map short IDs to line numbers in their Fountain files. Schema addition to `_-_.csv`: `source,line` / `structure,line` / `target,line`.
+
+Built on first access by scanning the Fountain file for `.{short_id}` lines. Stored in CSVS. Queried by `FountainWalk` methods instead of grepping the Fountain file on every call. Rebuilt when a Fountain file is modified (detected via mtime or explicit invalidation after `annotate`/`regrow` writes).
+
+This gives O(1) UUID→line-number lookup after the first scan, while keeping the data in CSVS where it belongs.
+
 ## CLI commands
 
 ### `tsugiki init <dir>`
 
-Replaces `scaffold_intent.py`. Creates directory layout, empty CSVs, `.csvs.csv`, `_-_.csv`.
+Replaces `scaffold_intent.py`. Creates directory layout, empty CSVs, `.csvs.csv`, `_-_.csv`, `.tsugiki-config`.
 
 ### `tsugiki status [<dir>]`
 
@@ -139,6 +147,26 @@ enum Cli {
         annotations: PathBuf,
         dir: Option<PathBuf>,
     },
+    Decompose {
+        source: PathBuf,
+        #[arg(long, default_value = "8")]
+        short_len: usize,
+        dir: Option<PathBuf>,
+    },
+    Regrow {
+        id: String,
+        text: String,
+        #[arg(long)]
+        note: Option<String>,
+        dir: Option<PathBuf>,
+    },
+    RegrowNext {
+        dir: Option<PathBuf>,
+    },
+    Render {
+        tree: String,  // "source", "target", "structure"
+        dir: Option<PathBuf>,
+    },
 }
 ```
 
@@ -151,17 +179,69 @@ enum Cli {
 - Integration: `status` output matches manual count.
 - Integration: `next` skips already-mapped nodes.
 
+### `tsugiki decompose <source.md> [<dir>]`
+
+Phase 1 entry point. Runs the parser (Layer 5) on source markdown, presents warnings interactively, writes `source.fountain` + `source-child.csv` on approval. Sets cursor to phase=understand, current=first leaf.
+
+Steps:
+1. Parse markdown → `ParseResult<Source>` (Layer 5).
+2. Present each `ParseWarning` to the human. Accept/reject/override.
+3. Validate the approved tree.
+4. Render to `source.fountain` (Layer 2).
+5. Write `source-child.csv` (Layer 2).
+6. Build and write `source-line.csv` index.
+7. Set cursor to `phase=understand, current=<first leaf>`.
+
+### `tsugiki regrow <short_id> <text> [<dir>]`
+
+Phase 3 write operation. Writes a target sentence for a structure node.
+
+Steps:
+1. Look up structure node by short id. Verify it exists and is a leaf (Depth 3).
+2. Find the structure node's parent → determine target block context.
+3. If the target block doesn't exist yet, prompt the human to name it (or auto-create from structure block annotation).
+4. Generate new target UUID.
+5. Insert into `target.fountain` (streaming insert under the target block heading).
+6. Append to `target-child.csv`.
+7. Append to `structure-target.csv`.
+8. Optionally add a regrow-phase note: prompt for parenthetical, write to `structure.fountain` with `|` prefix.
+9. Advance cursor.
+
+### `tsugiki regrow-next [<dir>]`
+
+Advance cursor to next unmapped structure leaf (checks `structure-target.csv`). Print structure annotation, parentheticals, source text (via bridge), and target block context.
+
+### `tsugiki render <source|target|structure> [<dir>]`
+
+Generate clean markdown from Fountain. Strips UUIDs, scene headings, section markers, parentheticals. Reassembles prose with paragraph breaks.
+
+- `tsugiki render source` → `source.md`
+- `tsugiki render target` → `target.md`
+- `tsugiki render structure` → `structure.md` (optional, for review)
+
+Respects multiline nodes. Preserves the translator's exact text — no reformatting, no normalization.
+
+This closes the circle: markdown → fountain → csvs → fountain → markdown.
+
 ## Replaces these Python scripts
 
 | Python script | CLI command |
 |---|---|
 | `scaffold_intent.py` | `tsugiki init` |
+| `decompose.py` | `tsugiki decompose` |
 | `understand_status.py` | `tsugiki status` |
 | `insert_structure.py` | `tsugiki batch-annotate` |
 | (manual process) | `tsugiki annotate`, `tsugiki next` |
+| (manual process) | `tsugiki regrow`, `tsugiki regrow-next` |
+| (manual process) | `tsugiki render source\|target` |
 
 ## Done when
 
 - All CLI commands work on a real intent directory (troper).
 - Cursor correctly tracks progress across sessions.
-- Python scripts are no longer needed for Phase 2 workflow.
+- `decompose` parses source markdown and produces valid source tree.
+- `regrow` writes target sentences with proper bridge edges.
+- `render source` and `render target` produce clean markdown matching hand-written originals.
+- Index tablets (`source-line.csv` etc.) built and queried correctly.
+- Full circle demonstrated: `source.md` → `decompose` → understand → regrow → `render target` → `target.md`.
+- Python scripts are no longer needed for any phase.

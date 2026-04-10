@@ -131,7 +131,7 @@ Strategy:
 ## Performance notes
 
 - `find_node` is O(n) per call where n = file lines. For interactive CLI this is fine (files are <1000 lines for a chapter).
-- If performance matters later, add a line-number index built on first scan.
+- For repeated access within a session, `FountainWalk` can use an index tablet (`source-line.csv`, `structure-line.csv`, `target-line.csv`) that maps short IDs to line numbers. The index is built on first scan, stored in CSVS, and invalidated when the Fountain file is modified. This gives O(1) lookup after the first pass. See Layer 4 plan for details.
 - CSVS grep is O(m) per call where m = CSV rows. Again fine for translation-scale data.
 
 ## Done when

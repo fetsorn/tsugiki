@@ -115,12 +115,12 @@ pub enum FootnoteStyle {
 }
 ```
 
-Steps:
-1. Split on headings → sections.
-2. Split sections on blank lines → paragraphs.
-3. Split paragraphs on sentence boundaries (language-specific) → sentences.
-4. Match footnote markers to footnote definitions → footnote children.
-5. Assign UUIDs. Build `MemTree<Source>` with containment edges.
+Steps (depth assignment is intent-specific, not fixed — see `ParseConfig`):
+1. Split on headings → depth 1 nodes (sections). If no headings, the whole document is one depth-0 root with direct children.
+2. Split sections on blank lines → depth 2 nodes (paragraphs).
+3. Split paragraphs on sentence boundaries (language-specific) → depth 3 nodes (sentences).
+4. Optionally match footnote markers to footnote definitions → depth 4 nodes (footnote children of sentences). Not all intents have footnotes.
+5. Assign UUIDs. Build `MemTree<Source>` with containment edges. Actual max depth depends on the source text.
 6. Collect warnings for every ambiguous decision.
 
 ## Sentence splitter trait (`sentence.rs`)
