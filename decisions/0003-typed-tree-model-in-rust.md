@@ -1,115 +1,71 @@
 ---
-status: proposed
-date: 2026-04-10
+status: accepted
+date: 2026-04-11
 ---
 
 # Typed tree model and streaming CLI in Rust
 
 ## Context and Problem Statement
 
-The three-tree data model (ADR-0001) and the translation workflow (ADR-0002) describe a structure of three trees — source, structure, target — connected by cross-tree bridges, stored as Fountain files and CSVS tablets. The current implementation is a set of Python scripts that load entire files into memory, build dictionaries, and perform lookups. This works for a prototype but creates three problems that grow worse with scale and tool diversity.
+The three-tree data model (ADR-0001) and the translation workflow (ADR-0002) describe source, structure, and target trees connected by bridges, stored as Fountain files and CSVS tablets. A prototype exists as Python scripts. Three problems grow worse with scale and tool diversity.
 
-### Problem 1: Implicit invariants
+### Implicit invariants
 
-The three trees have structural invariants that are never enforced by code:
+The trees have structural invariants that are never enforced by code:
 
-- Each tree has a depth ordering where a child's depth is exactly one level deeper than its parent's. The number of levels varies by intent — a letter might have four (document, section, paragraph, sentence), a monograph chapter five (adding footnotes), a book seven (adding parts and subchapters). The system enforces the relative invariant (child = parent + 1), not a fixed set of named levels.
-- Cross-tree bridges (source→structure, structure→target) must connect nodes of the same depth. A sentence-level source node maps to a sentence-level structure node, never to a section-level one.
-- Source and target trees have ordered siblings (file order matters). The structure tree has unordered siblings (file order is convenience).
-- Every source leaf should eventually have exactly one structure bridge. Every structure leaf should have zero or more target bridges.
+- Each tree has a depth ordering where a child's depth is exactly one level deeper than its parent's. The number of levels varies by intent — a letter might have three, a monograph chapter four. The system enforces the relative invariant (child = parent - 1 in depth), not a fixed set of named levels.
+- The source and structure trees are isomorphic: every source node has exactly one structure node at the same depth, and vice versa (structural fidelity, ADR-0001).
+- Cross-tree bridges (source→structure, structure→target) connect nodes of the same depth. A sentence-level source node maps to a sentence-level structure node, never to a section-level one.
+- Source and target trees have ordered siblings (file order matters). The structure tree has unordered siblings.
 
-These invariants live in ADR prose and in the human's mental model. When an AI session or a script violates them — misnumbering a depth level, creating a bridge between mismatched depths — nothing catches it. The error propagates silently into the CSVS tablets and Fountain files, where it becomes difficult to diagnose later.
+When an AI session or a script violates these invariants, nothing catches it. The error propagates silently into the CSVS tablets and Fountain files.
 
-### Problem 2: Session continuity
+### Session continuity
 
-An AI-assisted understanding session (Phase 2) walks the source tree node by node. When a session ends, the next session — whether with the same AI, a different AI, or a standalone CLI — needs to pick up exactly where the last one stopped. This requires knowing:
+An annotate session walks the structure tree node by node. When a session ends, the next session needs to pick up where the last one stopped. The position is derived from the file: the first structure node that still has placeholder text. No cursor file is needed, and storing one introduces synchronization problems.
 
-- Which source node was last annotated (a cursor position in the tree).
-- Which source nodes still lack structure annotations (a coverage query).
-- The parent chain of the current node (paragraph, section, document) for context.
-- The text of the next source node to present to the translator.
+### Source text parsing
 
-Currently, the AI reads entire Fountain files and CSVs to reconstruct this state. This is expensive in tokens and fragile across sessions. A new session that reads differently, or an AI that interprets the data model differently, may lose the thread.
+Source texts arrive as markdown. The parser must extract structure (headings, paragraphs, sentences), footnotes (`[^N]` references and definitions), and produce well-formed trees. Parsing errors must be caught before they enter the tree, not after they propagate through three trees and seven tablets.
 
-### Problem 3: Source text parsing
-
-Source texts arrive in many formats — docx, pdf, markdown, plain text. Each format has its own parsing challenges. The current decompose script handles Russian academic prose with a heuristic sentence splitter that protects abbreviations and initials. But different source languages, genres, and formats need different parsers.
-
-The deeper issue is that parsing errors are currently silent. If the sentence splitter incorrectly breaks "Дж. Тарелло" into two sentences, the resulting source tree has a malformed node. Nothing in the system catches this because the tree invariants are not checked. The parse error propagates into the structure tree (creating a bridge to a non-sentence) and eventually into the target tree.
-
-What is needed is not a perfect parser — parsing natural language will always be approximate — but a system that knows what guarantees it needs from a parser, can validate those guarantees against declared types, asks the human for approval when guarantees cannot be met, and catches violations early rather than letting them propagate through three trees and five CSVS tablets.
-
-## Decision Drivers
-
-- **Invariants must be enforced, not documented.** If a depth mismatch can be caught by the type system or a smart constructor, it should be. If it can only be caught at runtime, it should be caught immediately on construction, not during a later traversal.
-- **Streaming over loading.** Fountain files and CSVS tablets are line-oriented. Operations on them — find next sibling, read node content, check if mapped, append an annotation — should be line-oriented too. No operation in the normal workflow requires loading an entire file.
-- **Session state is a cursor, not a snapshot.** Resuming work means knowing one UUID and being able to walk from there. The tool should store and restore a cursor, not require re-reading the entire tree.
-- **Parsers are fallible and pluggable.** The system must define what a valid parse result looks like (a well-formed tree with correct depth ordering), accept parse results that meet this definition, reject or flag those that don't, and allow different parsers for different source formats.
-- **Testable with property-based tests.** The invariants should be expressible as properties that a test framework (proptest in Rust) can check against randomly generated trees and bridges.
-- **Readable by a human implementor.** This decision must contain enough detail for someone — human or AI — to scaffold the Rust crate without access to the conversation that produced it.
+Plain text input is not supported. Recovering footnotes from unformatted prose is impossible, and recovering structure is unreliable. The parser's input contract is well-formed markdown.
 
 ## Decision
 
 ### Core types
 
-The tree model is expressed as Rust types with enforcement at construction time.
-
-**Depth** is a newtype over `u8`. Depth counts upward from the sentence level: sentences are always Depth 0, and grouping levels above them increment. A text with sentences grouped only into chapters has two levels (0 and 1). A text with sentences in paragraphs in chapters has three (0, 1, 2). The number of levels is a property of the intent, not the system. The invariant is relative: a child's depth is exactly one less than its parent's.
-
-Fountain section markers map to grouping levels above the sentence: `#` is the highest grouping level in the file, `##` the next, `###` the next. Unmarked action blocks are always Depth 0 (sentences). The number of heading levels used determines the intent's tree height — one `#` plus sentences means height 2, `#` + `##` + sentences means height 3, `#` + `##` + `###` + sentences means height 4 (the maximum Fountain can express).
+**Depth** is a newtype over `u8`. Depth counts upward from the sentence level: sentences are always Depth 0, and grouping levels above them increment. A text with sentences grouped only into sections has two levels (0 and 1). A text with sentences in paragraphs in sections has three (0, 1, 2). The invariant is relative: a child's depth is exactly one less than its parent's.
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Depth(pub u8);
 
 impl Depth {
-    /// Whether this is the sentence (leaf) depth.
-    pub fn is_sentence(&self) -> bool {
-        self.0 == 0
-    }
+    pub fn is_sentence(&self) -> bool { self.0 == 0 }
 
-    /// The depth of a child node, if this depth can have children.
-    /// Depth 0 (sentence) is always a leaf — returns None.
     pub fn child(&self) -> Option<Depth> {
         if self.0 > 0 { Some(Depth(self.0 - 1)) } else { None }
     }
 
-    /// Whether this depth can contain the given child depth.
     pub fn can_contain(&self, child: &Depth) -> bool {
         self.0 > 0 && child.0 == self.0 - 1
     }
 }
 ```
 
-Because depth is counted from the sentence, there are no depth gaps to fill. If a text groups sentences directly under chapters with no paragraph level, `##` maps to Depth 1 and action blocks to Depth 0 — no synthetic intermediate nodes needed. The Fountain file is the tree, fully. CSVS containment tablets and Fountain always agree on which nodes exist.
+**Depth from Fountain markers.** The parser reads the Fountain file and assigns depth based on the heading levels actually present. If the file uses `#`, `##`, and action blocks, it assigns `#` → Depth 2, `##` → Depth 1, action → Depth 0. If the file uses `#`, `##`, `###`, and action blocks: `#` → Depth 3, `##` → Depth 2, `###` → Depth 1, action → Depth 0. The mapping is determined by counting the distinct heading levels in the file and assigning them top-down.
 
-If a text requires more than four levels of structural depth — a book with parts, chapters, sections, paragraphs, and sentences — the translator splits it into separate intents. A book becomes one intent per chapter (or per part, depending on the translator's judgment). This is not a limitation but a discipline: if the rhetorical structure cannot be held in four levels, the scope of the translation unit is too large for one pass.
+The maximum is four levels (`#` + `##` + `###` + action). If a text requires more depth, the translator splits it into separate intents (ADR-0001).
 
-**Depth from Fountain markers.** The parser reads the Fountain file and assigns depth based on the heading levels actually present. If the file uses `#`, `##`, and action blocks, it assigns `#` → Depth 2, `##` → Depth 1, action → Depth 0. If the file uses `#`, `##`, `###`, and action blocks, it assigns `#` → Depth 3, `##` → Depth 2, `###` → Depth 1, action → Depth 0. The mapping is determined by counting the distinct heading levels in the file and assigning them top-down.
+**Short ID length.** The length of the hex prefix used in Fountain `[[hex]]` notes is configurable. The default is 8 hex characters. For large intents, a longer prefix reduces collision probability. The length is set at glean time (`--short-len N` flag, default 8) and auto-detected by subsequent operations from the first `[[hex]]` note in the file. Internally, all data structures and CSVS tablets use full v4 UUIDs. Short IDs are a Fountain serialization concern only.
 
-The length of the short ID prefix used in Fountain files is configurable. The default is 8 hex characters (4 bytes). For large intents (hundreds of nodes), a longer prefix reduces collision probability. The length is set once, when `tsugiki decompose` creates the Fountain file (`--short-len N` flag, default 8). All subsequent operations auto-detect the length from the existing Fountain file by reading the first `[[hex]]` note. No configuration file is needed — the Fountain file itself is the record of the chosen length.
-
-Internally, all data structures and CSVS tablets use full v4 UUIDs. Short IDs are a Fountain serialization concern only, not a core type. The `NodeId` type wraps a full UUID. Truncation happens at the Fountain render boundary; lookup by prefix happens at the Fountain parse boundary.
-
-**Tree kind** is encoded as zero-sized types (phantom types) so the compiler distinguishes source, structure, and target at the type level:
+**Tree kind** is encoded as zero-sized phantom types so the compiler distinguishes source, structure, and target:
 
 ```rust
 pub struct Source;
 pub struct Structure;
 pub struct Target;
-```
 
-**Sibling ordering** is encoded as a trait bound. Source and target trees have ordered siblings; structure trees do not:
-
-```rust
-pub trait SiblingOrder {}
-pub struct Ordered;
-pub struct Unordered;
-impl SiblingOrder for Ordered {}
-impl SiblingOrder for Unordered {}
-
-// Source and Target are Ordered; Structure is Unordered.
-// This is expressed through the TreeKind trait:
 pub trait TreeKind {
     type Order: SiblingOrder;
 }
@@ -117,39 +73,6 @@ impl TreeKind for Source    { type Order = Ordered; }
 impl TreeKind for Structure { type Order = Unordered; }
 impl TreeKind for Target    { type Order = Ordered; }
 ```
-
-**Note** is a translator annotation attached to a structure node, written as a Fountain note (`[[text]]`) on its own line. Notes from the understand phase and regrow phase are distinguished by a leading `|`:
-
-```
-[[this node introduces the standard description]]
-[[| split into two target sentences, second carries the footnote]]
-```
-
-The first form (no prefix) is an understand-phase note. The second form (`| ` prefix) is a regrow-phase note. The pipe character at position 0 inside a note is reserved; translator input containing a leading pipe is escaped or rejected. Fountain notes are invisible in standard renderers, which is correct — translator annotations are working material, not delivered text.
-
-```rust
-pub enum NotePhase {
-    Understand,
-    Regrow,
-}
-
-pub struct Note {
-    pub phase: NotePhase,
-    pub text: String,
-}
-```
-
-**Auto-copy for single-sentence blocks.** When a block contains only one sentence, the structure tree still has two nodes: one at the block depth and one at the sentence depth. The sentence-level node carries the same annotation text as its parent — no special markup. The CLI auto-generates the sentence-level node when `annotate` creates a structure node for a sentence whose parent block has no other children.
-
-```
-## polite supplication [[f3a4b5c6]]
-
-polite supplication [[d7e8f9a0]]
-```
-
-This preserves the bridge depth-matching invariant: the source sentence (Depth 0) maps to a structure sentence (Depth 0), not to a structure block (Depth 1). The cost is one extra node per single-sentence block, but the translator never writes it — the tool handles it.
-
-**Resolved: notes instead of parentheticals.** By using Fountain notes (`[[text]]`) instead of parentheticals (`(text)`), we avoid the question of how Fountain parsers treat consecutive parentheticals outside dialogue context. Notes can appear anywhere in a Fountain document, multiple consecutive notes are unambiguous, and they are invisible in standard renderers. This also frees parentheticals for any future use that aligns with their standard Fountain role (dialogue direction).
 
 **Node** carries its tree kind as a phantom type parameter and its depth as a runtime value:
 
@@ -162,7 +85,20 @@ pub struct Node<T: TreeKind> {
 }
 ```
 
-**Containment edge** (parent-child within one tree) is constructed through a function that validates the depth invariant:
+**Note** is a translator annotation attached to a structure node:
+
+```rust
+pub enum NotePhase { Annotate, Regrow }
+
+pub struct Note {
+    pub phase: NotePhase,
+    pub text: String,
+}
+```
+
+In Fountain, annotate-phase notes are `[[text]]`. Regrow-phase notes are `[[| text]]` (pipe prefix). Both are Fountain notes, invisible in standard renderers.
+
+**Containment edge** validates the depth invariant at construction:
 
 ```rust
 pub struct ContainmentEdge<T: TreeKind> {
@@ -172,27 +108,17 @@ pub struct ContainmentEdge<T: TreeKind> {
 }
 
 impl<T: TreeKind> ContainmentEdge<T> {
-    pub fn new(
-        parent: &Node<T>,
-        child: &Node<T>,
-    ) -> Result<Self, TreeError> {
+    pub fn new(parent: &Node<T>, child: &Node<T>) -> Result<Self, TreeError> {
         if parent.depth.can_contain(&child.depth) {
-            Ok(ContainmentEdge {
-                parent: parent.uuid,
-                child: child.uuid,
-                _tree: PhantomData,
-            })
+            Ok(ContainmentEdge { parent: parent.uuid, child: child.uuid, _tree: PhantomData })
         } else {
-            Err(TreeError::InvalidDepth {
-                parent_depth: parent.depth,
-                child_depth: child.depth,
-            })
+            Err(TreeError::InvalidDepth { parent_depth: parent.depth, child_depth: child.depth })
         }
     }
 }
 ```
 
-**Bridge edge** (cross-tree) is similarly constructed with a depth-match check:
+**Bridge edge** validates depth matching at construction:
 
 ```rust
 pub struct BridgeEdge<From: TreeKind, To: TreeKind> {
@@ -202,30 +128,27 @@ pub struct BridgeEdge<From: TreeKind, To: TreeKind> {
 }
 
 impl<F: TreeKind, T: TreeKind> BridgeEdge<F, T> {
-    pub fn new(
-        from: &Node<F>,
-        to: &Node<T>,
-    ) -> Result<Self, TreeError> {
+    pub fn new(from: &Node<F>, to: &Node<T>) -> Result<Self, TreeError> {
         if from.depth != to.depth {
-            return Err(TreeError::DepthMismatch {
-                from_depth: from.depth,
-                to_depth: to.depth,
-            });
+            return Err(TreeError::DepthMismatch { from_depth: from.depth, to_depth: to.depth });
         }
-        Ok(BridgeEdge {
-            from: from.uuid,
-            to: to.uuid,
-            _marker: PhantomData,
-        })
+        Ok(BridgeEdge { from: from.uuid, to: to.uuid, _marker: PhantomData })
     }
 }
-```
 
-Note: the type system prevents constructing `BridgeEdge<Source, Target>` if no such type alias is defined. Only `BridgeEdge<Source, Structure>` and `BridgeEdge<Structure, Target>` should be aliased:
-
-```rust
+// Only these two bridge types are defined:
 pub type SourceStructureBridge = BridgeEdge<Source, Structure>;
 pub type StructureTargetBridge = BridgeEdge<Structure, Target>;
+```
+
+**Footnote reference edge** connects a sentence to its footnote block within the same tree. No depth constraint — the sentence and the footnote block live in different sections of the Fountain file.
+
+```rust
+pub struct FootnoteEdge<T: TreeKind> {
+    sentence: Uuid,
+    footnote: Uuid,
+    _tree: PhantomData<T>,
+}
 ```
 
 ### The TreeWalk trait
@@ -244,19 +167,19 @@ pub trait TreeWalk<T: TreeKind> {
 }
 ```
 
-Boxed iterators are the pragmatic choice for trait-object compatibility. The allocation is negligible at translation scale. Alternatives considered: associated types with GATs (zero-cost but prevents trait objects), callback/visitor pattern (no allocation but less composable), SmallVec (stack-allocated for typical branching factors). Boxed iterators keep the API ergonomic and composable.
+Boxed iterators are the pragmatic choice for trait-object compatibility. The allocation is negligible at translation scale.
 
 **In-memory implementation** (`MemTree<T>`) holds `HashMap`s of nodes, children, and content. Used in tests and for small trees.
 
-**Streaming implementation** (`FountainWalk<T>`) holds file paths to a Fountain file and a CSVS containment tablet. Each method issues a targeted read:
+**Streaming implementation** (`FountainWalk<T>`) holds file paths to a Fountain file and a CSVS containment tablet. Each method issues a targeted grep:
 
 - `children(uuid)`: grep the CSV for lines starting with the UUID.
 - `parent(uuid)`: grep the CSV for lines ending with the UUID.
-- `content(uuid)`: grep the Fountain file for `[[{short_uuid}]]`, extract the text from that line (before the note) or the heading text.
-- `depth(uuid)`: grep the Fountain file for `[[{short_uuid}]]`, check if the line starts with `#`, `##`, `###`, or none.
+- `content(uuid)`: grep the Fountain file for `[[{short_uuid}]]`, extract the text.
+- `depth(uuid)`: grep the Fountain file for `[[{short_uuid}]]`, check heading level.
 - `next_sibling(uuid)`: call `parent(uuid)`, then `children(parent)`, find position, return next.
 
-No method loads the entire file. Each is O(file_size) in the worst case for a grep, but operates on a single file and reads only the matched lines.
+No method loads the entire file. No line index is cached — every method is a stateless grep, deriving position fresh from the file each time. This eliminates synchronization bugs when files are modified between calls.
 
 ### Bridge operations
 
@@ -266,121 +189,63 @@ pub trait BridgeWalk<From: TreeKind, To: TreeKind> {
     fn bridge_sources(&self, to: Uuid) -> Result<Vec<Uuid>, TreeError>;
     fn is_mapped(&self, from: Uuid) -> Result<bool, TreeError>;
     fn unmapped_leaves(
-        &self,
-        tree: &dyn TreeWalk<From>,
+        &self, tree: &dyn TreeWalk<From>,
     ) -> Result<Box<dyn Iterator<Item = Uuid> + '_>, TreeError>;
 }
 ```
 
-Bridge methods return `Vec` because a single structure node can produce multiple target sentences (1:N in `structure-target.csv`), and theoretically multiple source sentences could collapse into one structure node (N:1 in `source-structure.csv`). The cong example already demonstrates the 1:N case: structure node `adc3ff3f` ("pharaoh addressing pharaoh") bridges to two target sentences.
+Bridge methods return `Vec` because a single structure node can produce multiple target sentences (1:N in `structure-target.csv`).
 
-**Streaming implementation** (`CsvBridgeWalk<From, To>`) holds the path to the bridge CSV (e.g., `source-structure.csv`). Each method is a grep.
-
-### Session cursor
-
-A session's position is a single UUID plus the tree it belongs to:
-
-```rust
-pub struct Cursor<T: TreeKind> {
-    pub current: Uuid,
-    _tree: PhantomData<T>,
-}
-
-impl<T: TreeKind> Cursor<T> {
-    /// Advance to the next node in depth-first order.
-    /// Returns None if the tree is exhausted.
-    pub fn advance(&self, tree: &dyn TreeWalk<T>) -> Result<Option<Cursor<T>>, TreeError> {
-        // Try first child
-        let children = tree.children(self.current)?;
-        if let Some(first) = children.first() {
-            return Ok(Some(Cursor { current: *first, _tree: PhantomData }));
-        }
-        // Try next sibling
-        if let Some(sib) = tree.next_sibling(self.current)? {
-            return Ok(Some(Cursor { current: sib, _tree: PhantomData }));
-        }
-        // Walk up and try uncle
-        let mut node = self.current;
-        while let Some(parent) = tree.parent(node)? {
-            if let Some(uncle) = tree.next_sibling(parent)? {
-                return Ok(Some(Cursor { current: uncle, _tree: PhantomData }));
-            }
-            node = parent;
-        }
-        Ok(None) // exhausted
-    }
-}
-```
-
-The cursor is serializable as a single UUID. Session state is stored in a CSVS tablet `phase-cursor.csv` within the intent's dataset. A single row records the current phase and the UUID of the current node:
-
-```
-understand,cfb0b898-full-uuid-here
-```
-
-When the phase advances (understand → regrow), the row updates. This keeps session state in the same dataset as all other intent data — queryable with panrec, version-controlled with the intent, no ad-hoc dotfiles.
+**Streaming implementation** (`CsvBridgeWalk<From, To>`) holds the path to the bridge CSV. Each method is a grep.
 
 ### Parser contract
 
-A parser converts a raw source document into a source tree. Different parsers handle different formats (docx, pdf, markdown, plain text) and languages. All parsers must satisfy the same output contract:
+A parser converts a markdown source document into a source tree and a structure skeleton. The input contract is well-formed markdown.
 
 ```rust
 pub struct ParseResult {
-    pub nodes: Vec<Node<Source>>,
-    pub edges: Vec<ContainmentEdge<Source>>,
+    pub source_nodes: Vec<Node<Source>>,
+    pub source_edges: Vec<ContainmentEdge<Source>>,
+    pub structure_nodes: Vec<Node<Structure>>,
+    pub structure_edges: Vec<ContainmentEdge<Structure>>,
+    pub bridges: Vec<SourceStructureBridge>,
+    pub footnote_edges: Vec<FootnoteEdge<Source>>,
     pub content: HashMap<Uuid, String>,
     pub warnings: Vec<ParseWarning>,
 }
 
 pub enum ParseWarning {
-    /// The parser was uncertain about a sentence boundary.
-    AmbiguousSplit {
-        before: String,
-        after: String,
-        position: usize,
-    },
-    /// A node's content was empty after cleaning.
+    AmbiguousSplit { before: String, after: String, position: usize },
     EmptyContent { uuid: Uuid },
-    /// The parser encountered a structure it could not classify into a depth level.
-    UnknownDepth { raw_text: String },
 }
 ```
 
-The `ParseResult` is validated before it becomes a source tree:
+The `ParseResult` is validated before it becomes a pair of trees:
 
 ```rust
 pub fn validate_parse(result: &ParseResult) -> Result<(), Vec<TreeError>> {
-    let mut errors = vec![];
-
-    // Check: exactly one root (Document depth, no parent)
+    // Check: exactly one root per tree
     // Check: every edge satisfies depth ordering
-    // Check: every node has exactly one parent (except root)
+    // Check: every non-root node has exactly one parent
     // Check: no cycles
     // Check: all UUIDs in edges appear in nodes
-
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    // Check: source-structure bridge is 1:1 (structural fidelity)
+    // Check: bridge edges connect nodes of matching depth
+    // Check: every footnote reference and definition are paired
 }
 ```
 
-Warnings do not block tree construction — they are presented to the human for review. The human may approve the parse as-is, edit the source text to resolve ambiguities, or reject and re-parse. The tool records which warnings were reviewed and approved, so a later session does not re-raise them:
-
-```rust
-pub struct ParseApproval {
-    pub warning_hash: String,  // hash of the warning content
-    pub approved_by: String,   // "human" or session identifier
-    pub date: String,
-}
-```
+Warnings do not block tree construction — they are presented to the translator for review. Errors do.
 
 ### Property-based tests
 
 The following properties are tested with `proptest` using randomly generated trees:
 
-1. **Depth monotonicity**: for every containment edge, `parent.depth.can_contain(&child.depth)` is true (i.e., child depth = parent depth + 1).
+1. **Depth monotonicity**: for every containment edge, child depth = parent depth - 1.
 2. **Single parent**: every non-root node has exactly one parent.
-3. **Bridge depth consistency**: for every bridge edge, `from.depth == to.depth`.
-4. **Leaf coverage** (after Phase 2): every source leaf has a bridge to a structure node.
-5. **Fountain roundtrip**: `parse(render(tree)) ≅ tree` (structural equality, ignoring UUIDs).
+3. **Bridge depth consistency**: for every bridge edge, from.depth == to.depth.
+4. **Structural fidelity**: source-structure bridge is 1:1 at every depth level.
+5. **Fountain roundtrip**: `parse(render(tree)) ≅ tree` (structural equality, ignoring whitespace).
 6. **CSV roundtrip**: `parse_csv(render_csv(edges)) == edges`.
 7. **Streaming equivalence**: for any tree, `MemTree` and `FountainWalk` return the same results for all `TreeWalk` methods.
 
@@ -389,111 +254,33 @@ Random tree generation respects the depth ordering:
 ```rust
 fn arb_tree<T: TreeKind>(height: u8) -> impl Strategy<Value = MemTree<T>> {
     // Generate a root at Depth(height - 1).
-    // For each depth level going down to 0, generate children (1..8 branching factor).
-    // Leaf nodes are at Depth(0) — always sentences.
-    // Content is arbitrary non-empty strings.
-    // height is a parameter (2..5) to test varying tree shapes (2 = chapter+sentences, 4 = max Fountain).
+    // For each depth going down to 0, generate children (1..8 branching factor).
+    // Leaves are at Depth(0). Content is arbitrary non-empty strings.
+    // height parameter ranges 2..5 to test varying tree shapes.
 }
 ```
 
 ### CLI commands
 
-The CLI is a thin wrapper around the trait methods:
+| Command                            | Implementation                          | Reads                    | Writes                   |
+|------------------------------------|-----------------------------------------|--------------------------|--------------------------|
+| `tsugiki glean <source.md>`        | parse markdown into source + structure  | markdown file            | source.fountain + structure.fountain + 4 CSVs |
+| `tsugiki next [--dir <dir>]`       | scan for first unannotated/untranslated | structure.fountain       | nothing                  |
+| `tsugiki annotate <addr> "<text>"` | write annotation into structure         | structure.fountain       | structure.fountain       |
+| `tsugiki regrow <addr> "<text>"`   | create target node, write bridge        | structure + bridge CSVs  | target.fountain + 2 CSVs |
+| `tsugiki reset annotate`           | archive and regenerate skeleton         | source tree              | structure.fountain       |
+| `tsugiki reset regrow`             | archive and clear target artifacts      | nothing                  | target.fountain + 3 CSVs |
+| `tsugiki render <tree>`            | strip Fountain to clean markdown        | fountain + footnote CSV  | .md file                 |
+| `tsugiki status`                   | count mapped vs unmapped nodes          | bridge CSVs + fountain   | nothing                  |
+| `tsugiki check`                    | check all invariants                    | all CSVs + all fountains | nothing                  |
 
-| Command                          | Implementation                           | Reads                        | Writes          |
-|----------------------------------|------------------------------------------|------------------------------|-----------------|
-| `tsugiki next <uuid>`            | `cursor.advance()`                       | grep CSV                     | nothing         |
-| `tsugiki read <uuid>`            | `tree.content()`                         | grep fountain                | nothing         |
-| `tsugiki mapped <uuid>`          | `bridge.is_mapped()`                     | grep bridge CSV              | nothing         |
-| `tsugiki context <uuid>`         | `tree.parent()` × N                      | grep CSV + fountain          | nothing         |
-| `tsugiki annotate <uuid> <text>` | construct node + edges, validate, append | nothing                      | append ×3       |
-| `tsugiki regrow <uuid> <text>`   | construct target node + edges, append    | grep structure + bridge CSV  | append ×3       |
-| `tsugiki regrow-next`            | advance cursor in structure tree         | grep structure-target CSV    | phase-cursor    |
-| `tsugiki render <tree>`          | strip Fountain to clean markdown         | read fountain                | write .md       |
-| `tsugiki status`                 | `bridge.unmapped_leaves()`               | grep bridge CSV + source CSV | nothing         |
-| `tsugiki validate`               | `validate_parse()` on all trees          | read all CSVs                | nothing         |
-| `tsugiki resume`                 | read phase-cursor tablet                 | grep phase-cursor CSV        | nothing         |
-
-The `annotate` command is the only write operation. It constructs a `Node<Structure>`, a `ContainmentEdge<Structure>`, and a `BridgeEdge<Source, Structure>` through the smart constructors, which validate depth matching. Then it appends one line to `structure.fountain` (after the paragraph heading — this is the one non-append operation, implemented as a streaming insertion), one line to `structure-child.csv`, and one line to `source-structure.csv`.
-
-### Fountain insertion as streaming transformation
-
-The `annotate` command's fountain insertion is expressed as an iterator adapter:
-
-```rust
-fn insert_after_paragraph(
-    lines: impl Iterator<Item = String>,
-    target_uuid: &str,
-    new_lines: Vec<String>,
-) -> impl Iterator<Item = String> {
-    // Emit all lines until `[[{target_uuid}]]` is found (in heading or action line).
-    // Emit that line and the following blank line.
-    // Emit new_lines.
-    // Emit remaining lines.
-}
-```
-
-This reads the fountain file line by line, writes to a temporary file, then replaces the original. Memory usage is O(new_lines), not O(file_size).
+The `<addr>` parameter accepts a line number, a short hex ID, or a full UUID. Line numbers are resolved against the current file state and never persisted.
 
 ## Consequences
 
-- The Rust crate becomes the canonical implementation of the three-tree model. Python scripts may continue to exist for prototyping but are not authoritative.
-- Every tree operation goes through a validated constructor. Depth mismatches, malformed edges, and invalid bridges become compile-time or construction-time errors, not silent data corruption.
+- Every tree operation goes through a validated constructor. Depth mismatches, malformed edges, and invalid bridges become construction-time errors, not silent data corruption.
 - The `TreeWalk` trait abstracts over storage. Tests use `MemTree`; the CLI uses `FountainWalk`. Both satisfy the same properties, verified by proptest.
-- Parsers become pluggable modules that produce a `ParseResult`. The system validates the result, flags warnings, and requires human approval for ambiguous cases. Parse errors are caught before they enter the tree, not after they propagate through three trees and five tablets.
-- Session continuity reduces to persisting a single UUID in a `phase-cursor.csv` CSVS tablet. No ad-hoc dotfiles; session state lives in the same dataset as all other intent data.
-- The streaming design means the CLI never loads a full file. Operations are proportional to the number of matched lines, not the total file size. This matters for book-length translations with thousands of nodes.
-- Property-based tests provide confidence that the invariants hold for arbitrary trees, not just the specific trees we have tested manually. Regressions in parser or tree construction code are caught automatically.
-- The type system prevents a class of errors that are currently possible: passing a source UUID to a function expecting a target UUID, constructing a bridge between source and target directly (bypassing structure), creating a containment edge between nodes of incompatible depths.
-- Haskell-style dependent types (proving depth equality at the type level) are not available in Rust. The smart-constructor pattern with proptest backing is the chosen alternative. If a future version of Rust adds const generics expressive enough for this, the design can be tightened.
-
-## Related work and scope
-
-### Translation memory and CAT tools
-
-Trados, MemoQ, OmegaT and similar tools segment source text into translation units (usually sentences), align them flat with target segments, and store the pairs in a database. They have no structure tree — alignment is source-sentence → target-sentence with no layer capturing what the sentence is doing. Segmentation is mechanical (SRX rules), not translator-guided. They cannot express that two source sentences map to one target sentence through a shared rhetorical intent. The demand in this space is enormous but the product is commodity. Tsugiki is not competing here; it addresses a layer these tools skip entirely.
-
-### Rhetorical Structure Theory (RST)
-
-RST is the academic formalism closest to the structure tree. RST parsers (Stede's work, the RST Discourse Treebank) and annotation tools (RSTTool, rstWeb) annotate text with rhetorical relations — elaboration, contrast, cause, concession. The overlap is that they build a tree of rhetorical intent over a text. The differences: RST is monolingual analysis (nobody uses RST as a bridge between source and target in translation); RST trees are relation-typed (each edge has a label like "elaboration"), while tsugiki's structure tree currently has untyped edges with intent captured in prose annotations and parentheticals. The demand is academic — RST is well-cited but has few practitioners and no commercial tools. The relevant insight: the structure tree's shape (depth = document/section/paragraph/sentence with "expressed through" semantics) is independently motivated by 40 years of discourse analysis research. Tsugiki rediscovered this shape from translation practice; RST arrived at it from linguistics.
-
-### Interlinear glossed text (IGT)
-
-Field linguists decompose source text into morphemes, gloss each morpheme, then produce a free translation. This gives three aligned layers — source, gloss, target — but the gloss layer is mechanical (morpheme-by-morpheme), not rhetorical. Alignment is at the word/morpheme level, not the sentence/paragraph level. Tools like SIL FLEx and Toolbox serve a real community. The overlap is the three-layer architecture. The difference is that tsugiki's middle layer captures intent, not morphology.
-
-### Screenwriting and the Fountain ecosystem
-
-Fountain format is used by Highland, Fade In, and open-source tools. Tsugiki reuses Fountain's tokens (forced scene headings for UUIDs, section markers for depth, parentheticals for translator notes, action blocks for prose). There is an interesting resonance beyond format: screenwriters think about "what is this beat doing" in exactly the way tsugiki's structure tree does. The beat sheet (Save the Cat, Snyder's structure) is a rhetorical structure tree for narrative. Nobody has formalized it as typed data, but the practice is there. Several Rust crates exist for Fountain parsing: `fountain-rs`, `rustwell`, `fountain-parser-rs`, `lottie/fount`. These may be usable for reading Fountain files, though tsugiki's use of Fountain tokens (forced scene headings as UUID markers, section markers as depth indicators) is non-standard and may require a custom parser or adapter layer on top of an existing crate.
-
-### Parallel corpus alignment
-
-Computational linguistics aligns sentences across parallel corpora for machine translation training (Europarl, OPUS project). Tools like hunalign and bleualign perform automatic sentence alignment. The overlap is source-target alignment. The differences: fully automatic, flat (no hierarchy), no rhetorical layer.
-
-### Legal annotation and hermeneutics
-
-Legal informatics has tools for annotating statutory text with interpretive layers — Akoma Ntoso for legislative XML, ELI for legal identifiers. The overlap is that they layer meaning over structured text. The difference: they annotate one text with metadata, not three aligned trees. The demand signal is real — legal translation is a high-value domain where "what is this clause doing" has contractual consequences, and the structure tree serves as an audit trail of translation decisions.
-
-### Literate programming
-
-Knuth's WEB, noweb, and org-mode tangling maintain prose and code as two views of the same structure. The overlap is the dual-tree idea — one tree for the human narrative, one for the machine-executable structure. The difference: literate programming has two trees, not three, and the "structure" tree is implicit in the code's AST.
-
-### What is novel
-
-Three things in tsugiki appear to have no public software precedent:
-
-1. **The three-tree bridge.** Using a rhetorical intent tree as the alignment layer between source and target in translation. The theoretical pieces (RST, translation studies, CAT tools) exist independently but have not been combined in a tool.
-
-2. **The AI constraint.** AI contributes structure (questions, annotations, faithful recording) but never target-language text. This inverts the current industry direction where AI generates translations and humans post-edit.
-
-3. **Prose-readable rhetorical structure.** Storing the intent tree as Fountain prose with parenthetical annotations, so the rhetorical structure is readable as a document rather than locked in XML or a database.
-
-### Sustainability and demand
-
-Professional translators are conservative about tools. The learning curve of "decompose, understand, regrow" is steep compared to "type the translation in the right box." Demand is more likely to come from: translation studies (academic, where the three-tree model has theoretical value), literary translators (artisanal, where the translator's voice must be uncontaminated), and legal translators (where "why did you translate it this way" has contractual consequences and the structure tree is an audit trail). The typed Rust implementation lowers the barrier by making the workflow available as a CLI that catches errors early, rather than requiring an AI session to maintain the invariants.
-
-### Build vs reuse
-
-- **CSVS and panrec**: already exist, handle all tablet operations. Panrec also handles rich text to markdown conversion, which means the tsugiki parser only needs to deal with markup and plain text, not docx/pdf/etc.
-- **Fountain parsing**: existing Rust crates (`fountain-rs`, `rustwell`, `fountain-parser-rs`, `lottie/fount`) may provide a base, though tsugiki's non-standard use of Fountain tokens likely requires a custom layer.
-- **RST**: theoretical grounding for the structure tree, but no code to reuse.
-- **Tree types, streaming CLI, proptest suite, cursor model, parser contract**: novel, built from scratch.
+- Parsers are pluggable modules that produce a `ParseResult` containing both source and structure trees (structural fidelity enforced at parse time). The system validates the result, flags warnings, and requires human approval for ambiguous cases.
+- The streaming design means the CLI never loads a full file. Every operation is a stateless grep — no cached line index, no stale state.
+- Property-based tests provide confidence that invariants hold for arbitrary trees. Regressions in parser or tree construction code are caught automatically.
+- The type system prevents passing a source UUID to a function expecting a target UUID, constructing a bridge between source and target directly (bypassing structure), or creating a containment edge between nodes of incompatible depths.
