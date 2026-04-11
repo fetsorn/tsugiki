@@ -54,11 +54,11 @@ Depth assignment: count distinct heading levels in file on first pass. Map shall
 
 Seven commands. That is the API for Layer -1.
 
-### `tsugiki init <source.md> [--dir <dir>]`
+### `tsugiki init <source.md>`
 
-Parse a well-formed markdown file into source and structure trees.
+Parse a well-formed markdown file into source and structure trees. The CLI looks for `prose/` and `csvs/` in the current directory — the translator `cd`s into the intent directory (git model, no `--dir` flag).
 
-1. Read the markdown file. Extract headings (depth levels), paragraph blocks (text between blank lines under a heading), and footnotes (`[^N]` references and `[^N]:` definitions).
+1. Read the markdown file. Extract headings (depth levels) and paragraph blocks (text between blank lines under a heading).
 2. Assign UUIDs to every node. Headings become inner nodes, paragraphs become leaves. Generate the source tree (containment edges) and the structure skeleton (matching containment edges, empty content).
 3. Write artifacts:
    - `prose/source.fountain` — the full source text with `[[hex-id]]` on each heading and action line.
@@ -67,15 +67,14 @@ Parse a well-formed markdown file into source and structure trees.
    - `csvs/source-child.csv` — source containment edges.
    - `csvs/structure-child.csv` — structure containment edges.
    - `csvs/source-structure.csv` — the 1:1 bridge (every source node to its structure shadow).
-   - `csvs/source-footnote.csv` — node-to-footnote reference edges (if footnotes exist).
    - `csvs/.csvs.csv` and `csvs/_-_.csv` — dataset identity and schema.
-4. Print a summary: number of nodes per depth level, number of footnotes.
+4. Print a summary: number of nodes per depth level.
 
 No sentence splitting. Paragraphs are the initial leaves. The translator refines granularity with `split`.
 
 If the intent directory already contains artifacts, `init` refuses to overwrite. The translator must `reset` first or start in an empty directory.
 
-### `tsugiki split <addr> [--dir <dir>]`
+### `tsugiki split <addr>`
 
 Split has two modes based on the presence of stdin.
 
@@ -95,7 +94,7 @@ Split has two modes based on the presence of stdin.
 
 **Guard:** refuse to split a leaf whose corresponding structure node has a non-empty annotation. This prevents orphaning annotations. The translator must be in the split or pre-annotate stage for that leaf.
 
-### `tsugiki next [--dir <dir>]`
+### `tsugiki next`
 
 Determine the current phase by checking which artifacts exist:
 - If `structure.fountain` has nodes with empty content → annotate phase (or split phase — the translator decides).
@@ -113,16 +112,15 @@ annotate phase
        parent: Обращение [aaec663b]
 ```
 
-In regrow phase, also check for footnotes:
+In regrow phase:
 
 ```
 regrow phase
   L12 [c0a28c91] anniversary marks a summit of growth
        source: За прошедшие десятилетия Институт права...
-       ⚠ source has footnote: "The Institute was founded in 1988..."
 ```
 
-### `tsugiki show <addr> [--dir <dir>]`
+### `tsugiki show <addr>`
 
 Display a single node with its full context. Resolve `<addr>` to a node in any tree.
 
@@ -132,11 +130,10 @@ Print:
 - Its children (if any).
 - Its bridge counterpart(s): for a source node, the corresponding structure annotation; for a structure node, the source text and any target text; for a target node, the structure annotation it expresses.
 - Any translator notes attached.
-- Footnote reference if one exists.
 
 This is the "look around" command for orienting yourself at any point in the workflow.
 
-### `tsugiki annotate <addr> "<text>" [--note "<note>"] [--dir <dir>]`
+### `tsugiki annotate <addr> "<text>" [--note "<note>"]`
 
 1. Resolve `<addr>` to a node in `structure.fountain`. The address can be a line number, a short hex ID, or a full UUID.
 2. Overwrite the empty content for that node with the provided text. If `--note`, add a `[[note text]]` line after the content.
@@ -146,7 +143,7 @@ The write is a streaming transformation: read the file line by line, write to a 
 
 No CSV writes. The bridge and containment tablets were populated at init and split time.
 
-### `tsugiki regrow <addr> "<text>" [--footnote "<footnote-text>"] [--dir <dir>]`
+### `tsugiki regrow <addr> "<text>"`
 
 1. Resolve `<addr>` to a structure leaf node.
 2. Generate a new UUID for the target node.
@@ -154,19 +151,15 @@ No CSV writes. The bridge and containment tablets were populated at init and spl
 4. Append to `target.fountain`: the target text as an action block with `[[new-uuid]]`, under the appropriate heading.
 5. Append to `csvs/target-child.csv`: the containment edge.
 6. Append to `csvs/structure-target.csv`: the bridge edge.
-7. If `--footnote` is provided: generate a UUID for the target footnote node, append to target's `## Footnotes` section, append to `csvs/target-footnote.csv`.
-8. Print confirmation.
+7. Print confirmation.
 
-When presenting a node for regrow (via `next`), the CLI checks `source-footnote.csv` to see if the corresponding source node has a footnote. The translator can provide the footnote text inline with `--footnote` or come back to it later.
-
-### `tsugiki render <tree> [--dir <dir>]`
+### `tsugiki render <tree>`
 
 Render a Fountain file to clean markdown. `<tree>` is `source` or `target`.
 
 1. Read the Fountain file line by line. Strip `[[hex-id]]` notes, `[[annotation]]` notes, and `[[| regrow notes]]`.
 2. Reassemble prose with paragraph breaks. Heading markers become markdown headings.
-3. Handle footnotes: walk the main text, and for each node that has a reference edge in `source-footnote.csv` (or `target-footnote.csv`), assign the next footnote number by order of first reference. Insert `[^N]` at the node boundary. Collect footnote bodies for the bottom of the document.
-4. Write the output to `prose/source.md` or `prose/target.md`.
+3. Write the output to `prose/source.md` or `prose/target.md`.
 
 ### Addressing
 
@@ -195,7 +188,6 @@ Line numbers are the most natural for interactive use. They are never stored —
 - Does `tsugiki split` (get/put) feel natural for decomposing paragraphs into working units?
 - Does `tsugiki next` → `tsugiki annotate` → `tsugiki next` feel like a natural loop for the annotate phase?
 - Does `tsugiki next` → `tsugiki regrow` → `tsugiki next` feel natural for the regrow phase?
-- Does the footnote prompt during regrow work in practice?
 - Does the streaming write (temp file + replace) work reliably?
 - Does `tsugiki render` produce clean markdown that matches hand-written output?
 - Can a translator make progress on real intents using only this CLI?
@@ -216,7 +208,6 @@ Findings from this layer become constraints for the typed implementation:
 - Which commands were awkward → these get redesigned before typing.
 - Whether the Fountain format has parsing edge cases → these become test fixtures.
 - Whether the stateless scanning (no cursor) works at scale.
-- Whether footnote handling during regrow adds friction or flows naturally.
 - Whether split's get/put interface works for both standalone and AI-assisted modes.
 - Whether leaves at different depths cause any practical problems.
 - Whether the init → split → annotate → regrow → render pipeline produces artifacts consistent with hand-built intents.

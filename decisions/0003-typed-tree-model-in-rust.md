@@ -27,9 +27,9 @@ An annotate session walks the structure tree node by node. When a session ends, 
 
 ### Source text parsing
 
-Source texts arrive as markdown. The parser must extract structure (headings, paragraph blocks) and footnotes (`[^N]` references and definitions), and produce well-formed trees. Parsing errors must be caught before they enter the tree, not after they propagate through three trees and seven tablets.
+Source texts arrive as markdown. The parser must extract structure (headings, paragraph blocks) and produce well-formed trees. Parsing errors must be caught before they enter the tree, not after they propagate through three trees and five tablets.
 
-Plain text input is not supported. Recovering footnotes from unformatted prose is impossible, and recovering structure is unreliable. The parser's input contract is well-formed markdown.
+Plain text input is not supported. Recovering structure from unformatted prose is unreliable. The parser's input contract is well-formed markdown.
 
 ## Decision
 
@@ -149,16 +149,6 @@ pub type SourceStructureBridge = BridgeEdge<Source, Structure>;
 pub type StructureTargetBridge = BridgeEdge<Structure, Target>;
 ```
 
-**Footnote reference edge** connects a node to its footnote block within the same tree:
-
-```rust
-pub struct FootnoteEdge<T: TreeKind> {
-    node: Uuid,
-    footnote: Uuid,
-    _tree: PhantomData<T>,
-}
-```
-
 ### The TreeWalk trait
 
 All tree traversal goes through a single trait, implementable by both in-memory trees (for tests) and streaming file walkers (for CLI):
@@ -217,7 +207,6 @@ pub struct ParseResult {
     pub structure_nodes: Vec<Node<Structure>>,
     pub structure_edges: Vec<ContainmentEdge<Structure>>,
     pub bridges: Vec<SourceStructureBridge>,
-    pub footnote_edges: Vec<FootnoteEdge<Source>>,
     pub content: HashMap<Uuid, String>,
     pub warnings: Vec<ParseWarning>,
 }
@@ -238,7 +227,6 @@ pub fn validate_parse(result: &ParseResult) -> Result<(), Vec<TreeError>> {
     // Check: all UUIDs in edges appear in nodes
     // Check: source-structure bridge is 1:1 (structural fidelity)
     // Check: source and structure trees have the same shape
-    // Check: every footnote reference and definition are paired
 }
 ```
 
@@ -300,16 +288,16 @@ fn arb_tree<T: TreeKind>(max_depth: u8) -> impl Strategy<Value = MemTree<T>> {
 
 | Command                            | Implementation                         | Reads                    | Writes                                        |
 |------------------------------------|----------------------------------------|--------------------------|-----------------------------------------------|
-| `tsugiki init <source.md>`         | parse markdown into source + structure | markdown file            | source.fountain + structure.fountain + 4 CSVs |
+| `tsugiki init <source.md>`         | parse markdown into source + structure | markdown file            | source.fountain + structure.fountain + 3 CSVs |
 | `tsugiki split <addr>`             | get: print leaf text                   | source.fountain          | nothing                                       |
 | `tsugiki split <addr> < input`     | put: split leaf into fragments         | source.fountain + CSVs   | source.fountain + structure.fountain + 3 CSVs |
-| `tsugiki next [--dir <dir>]`       | scan for first unannotated/unmapped    | structure.fountain       | nothing                                       |
+| `tsugiki next`                     | scan for first unannotated/unmapped    | structure.fountain       | nothing                                       |
 | `tsugiki show <addr>`              | display node with context              | fountain files + CSVs    | nothing                                       |
 | `tsugiki annotate <addr> "<text>"` | write annotation into structure        | structure.fountain       | structure.fountain                            |
 | `tsugiki regrow <addr> "<text>"`   | create target node, write bridge       | structure + bridge CSVs  | target.fountain + 2 CSVs                      |
 | `tsugiki reset annotate`           | archive and regenerate skeleton        | source tree              | structure.fountain                            |
-| `tsugiki reset regrow`             | archive and clear target artifacts     | nothing                  | target.fountain + 3 CSVs                      |
-| `tsugiki render <tree>`            | strip Fountain to clean markdown       | fountain + footnote CSV  | .md file                                      |
+| `tsugiki reset regrow`             | archive and clear target artifacts     | nothing                  | target.fountain + 2 CSVs                      |
+| `tsugiki render <tree>`            | strip Fountain to clean markdown       | fountain file            | .md file                                      |
 | `tsugiki status`                   | count mapped vs unmapped nodes         | bridge CSVs + fountain   | nothing                                       |
 | `tsugiki check`                    | check all invariants                   | all CSVs + all fountains | nothing                                       |
 

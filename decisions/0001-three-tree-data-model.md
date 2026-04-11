@@ -28,7 +28,7 @@ Translation is modeled as three trees that share a single abstract root: the com
 
 **Source tree.** A structural decomposition of the original text. Parent-child means containment: a chapter contains paragraphs, a paragraph contains its working units. The order of siblings is the author's ordering and is significant.
 
-**Structure tree.** A rhetorical decomposition of communicative intent. It mirrors the shape of the source tree — the same nesting, the same branching — but parent-child means "is expressed through these sub-meanings." The order of siblings is not significant; what matters is which structure nodes are children of which. Each structure node carries a short annotation in whatever language the translator thinks in, naming the rhetorical move precisely enough that someone who does not speak the source language could reconstruct the intent of the text from the structure tree alone.
+**Structure tree.** A rhetorical decomposition of communicative intent. It mirrors the shape of the source tree — the same nesting, the same branching — but parent-child means "is expressed through these sub-meanings." Siblings are semantically unordered but pragmatically file-ordered. what matters is which structure nodes are children of which. Each structure node carries a short annotation in whatever language the translator thinks in, naming the rhetorical move precisely enough that someone who does not speak the source language could reconstruct the intent of the text from the structure tree alone.
 
 **Target tree.** A structural decomposition of the translated text. Same containment logic as the source tree. The order of siblings is the translator's ordering and may differ from the source ordering.
 
@@ -43,8 +43,6 @@ The translator works leaf by leaf. A leaf is any node with no children — the s
 No depth level is privileged. The system does not have a concept of "sentence level" — it has leaves and inner nodes. Leaves are the units of annotation (each leaf gets one structure annotation) and the units of regrow (each structure leaf maps to one or more target leaves). Inner nodes provide grouping and context.
 
 Leaves may exist at different depths within the same tree. A translator might split one paragraph into five leaves while leaving another paragraph as a single leaf. Both are valid decompositions.
-
-Split behaves differently depending on depth. If the leaf is above the maximum depth, it becomes an inner node and the new leaves are its children at depth+1. If the leaf is already at maximum depth (depth 4), it is replaced by N sibling leaves at the same depth under the same parent — flattening, because there is no deeper level to go to.
 
 ### Prose lives in Fountain files
 
@@ -67,17 +65,9 @@ The maximum is four levels (`#` + `##` + `###` + action blocks). If a text requi
 
 Depth values are internal to the tree. In user-facing output, the CLI displays depth as level numbers (L1, L2, L3, L4) counting from the root. The mapping between Fountain heading markers and depth is determined by counting the distinct heading levels actually present in the file.
 
-### Footnotes are stray ideas
+### Footnotes are deferred
 
-Footnotes — citations, hedges, tangential remarks, digressions the author could not resist — are outside the communicative intent of the text. If a footnote contained relevant evidence, that evidence would be in the main text. Footnotes do not participate in the rhetorical arc.
-
-Source footnotes live in a `## Footnotes` section at the bottom of `source.fountain`, as regular leaf nodes. Target footnotes live in the same position in `target.fountain`. No structure nodes are generated for footnotes. They are not walked during annotate and are translated directly during regrow. Footnote bodies are always single leaves — they are not split further.
-
-Footnote numbers do not appear in Fountain files. Numbers are rendering artifacts, assigned at render time by order of first reference in the main text. If the translator reorders the target text, footnotes renumber automatically.
-
-The relationship between a text node and its footnote is recorded as a reference edge: `source-footnote.csv` connects a source node to its footnote, `target-footnote.csv` does the same for the target. During regrow, the CLI traverses the graph (source node → source-footnote → footnote → source-structure → structure) to prompt: "this node's source has a footnote — attach it here?"
-
-The source-to-target footnote correspondence is derived through graph traversal, not stored directly. Each source footnote maps to exactly one target footnote. The translator may also add footnotes that exist only in the target, with no source counterpart.
+Footnotes — citations, hedges, tangential remarks, digressions the author could not resist — are outside the communicative intent of the text. They do not participate in the rhetorical arc. Footnote handling (reference edges, render-time numbering, graph traversal for correspondence) is deferred to a later layer. The main loop (init → split → annotate → regrow → render) must be solid before footnotes are added as a sidecar.
 
 ### Relationships live in CSVS
 
@@ -90,8 +80,6 @@ CSVS tablets store only UUID-to-UUID relationships, never arbitrary text:
 | `structure-child.csv`  | Depth relationships within the structure tree         |
 | `source-structure.csv` | Which structure node corresponds to each source node  |
 | `structure-target.csv` | Which target node(s) express each structure node      |
-| `source-footnote.csv`  | Which source node anchors which source footnote       |
-| `target-footnote.csv`  | Which target node anchors which target footnote       |
 
 Schema (`_-_.csv`):
 ```
@@ -100,8 +88,6 @@ target,child
 structure,child
 source,structure
 structure,target
-source,footnote
-target,footnote
 ```
 
 ### Project layout
@@ -124,8 +110,6 @@ Each translation intent is its own directory with its own version control:
     target-child.csv     — target tree containment
     source-structure.csv — source-to-structure bridge
     structure-target.csv — structure-to-target bridge
-    source-footnote.csv  — source node-to-footnote reference
-    target-footnote.csv  — target node-to-footnote reference
 ```
 
 ## Consequences
@@ -135,4 +119,4 @@ Each translation intent is its own directory with its own version control:
 - The structure tree is the shared ground between source and target. It is where AI and translator meet to discuss options — by referencing structure nodes, not by generating target-language text.
 - Structural fidelity (source-structure isomorphism) is the defining constraint. It makes the three-tree workflow a tool for translation, not for adaptation or creative rewriting.
 - Leaves are the working unit. No depth level is privileged. The translator controls the granularity of decomposition, and the system supports uneven leaf depths within a single tree.
-- Footnotes stay outside the rhetorical structure. Their numbering is a render-time artifact, their correspondence is derived through graph traversal, and their translation is direct — no annotation pass needed.
+- Footnotes are deferred. The main loop must prove itself before the sidecar complexity of footnote edges, render-time numbering, and graph-traversed correspondence is added.

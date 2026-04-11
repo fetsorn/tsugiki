@@ -15,15 +15,13 @@ The workflow must work in two modes: an AI-assisted session where the translator
 
 ### Phase 1: Init
 
-The translator provides a source text as a well-formed markdown file. Markdown input is required — the parser needs unambiguous structure (headings for sections, paragraphs for blocks) and unambiguous footnotes (`[^N]` references and `[^N]:` definitions). Plain text input is not supported because recovering structure from unformatted prose is unreliable, and recovering footnotes from it is impossible.
+The translator provides a source text as a well-formed markdown file. Markdown input is required — the parser needs unambiguous structure (headings for sections, paragraphs for blocks). Plain text input is not supported because recovering structure from unformatted prose is unreliable.
 
 The parser reads the markdown, extracts the heading hierarchy and paragraph blocks, and produces the source tree and the structure tree skeleton simultaneously. Headings become inner nodes at the appropriate depth. Each paragraph — a block of text between blank lines — becomes a leaf node. No sentence splitting is performed. The paragraph is the initial leaf granularity.
 
 Because of the structural fidelity invariant (ADR-0001), every source node gets a shadow structure node with matching tree position, and the bridge tablets (`source-structure.csv`, `source-child.csv`, `structure-child.csv`) are fully populated at this step.
 
 The structure skeleton in `structure.fountain` comes out with headings that carry UUIDs but no titles, and action blocks that carry UUIDs but no text. The annotate phase fills in the annotations. The heading-level structure nodes will receive their annotations during annotate, the same as leaf nodes.
-
-Footnotes are extracted from the markdown, placed in a `## Footnotes` section at the bottom of `source.fountain`, and their reference edges are written to `source-footnote.csv`. Each footnote becomes a single leaf node — footnote bodies are not split.
 
 **Artifacts produced:**
 - `prose/source.fountain` — the full source text, annotated with UUIDs and section markers.
@@ -32,7 +30,6 @@ Footnotes are extracted from the markdown, placed in a `## Footnotes` section at
 - `csvs/source-child.csv` — source containment edges.
 - `csvs/structure-child.csv` — structure depth edges.
 - `csvs/source-structure.csv` — the 1:1 bridge between source and structure.
-- `csvs/source-footnote.csv` — node-to-footnote reference edges (if footnotes exist).
 
 If the intent directory already contains artifacts, `init` refuses to overwrite.
 
@@ -46,7 +43,7 @@ Split operates on a single leaf at a time. It has two modes:
 
 **Put mode.** The translator provides the same text back, broken into multiple lines. Each line becomes a new leaf node. The CLI validates that the concatenation of the input lines matches the original text (modulo whitespace) — split is a scalpel, not a pen.
 
-If the leaf is above maximum depth, the original leaf becomes an inner node and the new leaves are its children at depth+1. If the leaf is already at maximum depth (depth 4), the original is replaced by N sibling leaves at the same depth under the same parent — flattening, because there is nowhere deeper to go. New structure skeleton nodes are created for each new leaf, and bridge edges connect them.
+If the leaf is above maximum depth, the original leaf becomes an inner node and the new leaves are its children at depth+1. If the leaf is already at maximum depth (depth 4), the original is replaced by N sibling leaves at the same depth under the same parent — flattening, because there is nowhere deeper to go. New structure skeleton nodes are created for each new leaf, and bridge edges connect them. In both cases, the old bridge edge (original source node → original structure node) and the old containment edges are removed and replaced by the new ones. The original UUIDs are retired — no dangling references survive the split.
 
 If the translator provides a single line (or the same text unsplit), nothing happens.
 
@@ -88,17 +85,12 @@ This is where the translator's craft lives. The AI does not write target-languag
 
 During regrow, the structure tree is a living document. The translator adds `[[| text]]` notes (pipe prefix) about why they made a particular choice, or refines the annotation now that they see how it lands in the target language. The structure tree grows across phases 3 and 4.
 
-**Footnote handling.** When the CLI presents a structure node whose source has a footnote (detected by traversing source-structure → source → source-footnote), it prompts: the source footnote text is shown, and the translator is asked whether to attach a footnote to this target node. If yes, the translator writes the footnote translation, and the CLI places it in the target's `## Footnotes` section and writes the reference edge to `target-footnote.csv`. If the source node was split into multiple target nodes, the translator chooses which one gets the footnote.
-
-Footnotes are translated directly — no annotation pass, no structure nodes. They are stray ideas, and the translation is usually straightforward.
-
 **Artifacts produced:**
 - `prose/target.fountain` — the translated text with UUIDs and section markers.
 - `prose/target.md` — a clean rendered copy of the translation.
 - `prose/structure.fountain` — updated with `[[| text]]` notes from regrow.
 - `csvs/target-child.csv` — target containment edges.
 - `csvs/structure-target.csv` — structure-to-target bridge.
-- `csvs/target-footnote.csv` — target node-to-footnote reference edges.
 
 ## Addressing
 
@@ -113,7 +105,7 @@ The phases are sequential in recommendation: init, then split, then annotate, th
 If the translator wants to redo a phase from scratch, the CLI provides reset commands:
 
 - **`tsugiki reset annotate`**: archive `structure.fountain` as `structure.{ISO-timestamp}.fountain` in place, then regenerate the skeleton from the source tree. All annotations are lost; the archived file is the safety net.
-- **`tsugiki reset regrow`**: archive `target.fountain`, `target-child.csv`, `structure-target.csv`, and `target-footnote.csv` with ISO timestamps. Clear the target artifacts. The translator starts regrow from the beginning.
+- **`tsugiki reset regrow`**: archive `target.fountain`, `target-child.csv`, and `structure-target.csv` with ISO timestamps. Clear the target artifacts. The translator starts regrow from the beginning.
 
 Archives are never overwritten. If the translator resets twice in one day, both archives coexist with different timestamps. Moving or deleting archives is the translator's concern.
 
@@ -121,16 +113,14 @@ Archives are never overwritten. If the translator resets twice in one day, both 
 
 `tsugiki render source` and `tsugiki render target` produce clean markdown from the Fountain files by stripping UUIDs, section markers, and translator notes, then reassembling the prose with paragraph breaks.
 
-The renderer handles footnotes: it walks the main text, and for each node that has a reference edge in `source-footnote.csv` (or `target-footnote.csv`), it assigns the next footnote number, inserts `[^N]` into the markdown output at the node boundary, and collects the footnote body for the bottom of the document. Footnote numbers are derived from order of first reference — they exist only in the rendered markdown, never in the Fountain files.
-
 ## Workflow summary
 
 | Phase    | Translator does                            | Artifacts written                                                              | Structure tree status                |
 |----------|--------------------------------------------|--------------------------------------------------------------------------------|--------------------------------------|
-| Init     | Provides markdown source                   | source.fountain, structure.fountain (skeleton), source.md, 4 CSV tablets       | Skeleton with empty annotations      |
+| Init     | Provides markdown source                   | source.fountain, structure.fountain (skeleton), source.md, 3 CSV tablets       | Skeleton with empty annotations      |
 | Split    | Breaks paragraph leaves into working units | source.fountain, structure.fountain (skeleton extended), 3 CSV tablets updated | Skeleton extended for new leaves     |
 | Annotate | Names the rhetorical move of each node     | structure.fountain (annotations filled in, notes added)                        | Populated with annotations and notes |
-| Regrow   | Writes target text for each structure leaf | target.fountain, target.md, structure.fountain (regrow notes), 3 CSV tablets   | Updated with regrow-phase notes      |
+| Regrow   | Writes target text for each structure leaf | target.fountain, target.md, structure.fountain (regrow notes), 2 CSV tablets   | Updated with regrow-phase notes      |
 
 ## Consequences
 
@@ -141,4 +131,4 @@ The renderer handles footnotes: it walks the main text, and for each node that h
 - The annotate phase is a streaming read-write on one file — no CSV operations, no insertion logic beyond overwriting empty annotations.
 - No cursor file is needed. The CLI derives position from the file state. This eliminates a class of synchronization bugs.
 - Reset is archive-and-regenerate, not rollback. The archived file is always available. The regeneration is deterministic from the previous phase's output.
-- Footnotes are handled as a lightweight sidecar during regrow, not as a parallel workflow with its own phases.
+- Footnotes are deferred (ADR-0001). The main loop must prove itself first.
