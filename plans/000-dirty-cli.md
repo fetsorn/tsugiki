@@ -85,11 +85,12 @@ Split has two modes based on the presence of stdin.
 
 1. Concatenate input lines (stripping whitespace) and compare against the original leaf text. If they don't match, error — split is cutting, not editing.
 2. If input is a single line matching the original, no-op.
-3. The original leaf becomes an inner node. Each input line becomes a child leaf at depth = original depth + 1.
+3. If the leaf is above max depth: the original becomes an inner node (hollow container). Each input line becomes a child leaf at depth = original depth + 1.
+   If the leaf is at max depth (depth 4): the original is removed. Each input line becomes a sibling leaf at the same depth, under the same parent.
 4. Generate UUIDs for each new leaf. Create matching structure skeleton nodes with empty content. Create bridge edges.
-5. Update `prose/source.fountain`: replace the original leaf's content with the new child nodes under a heading (if the original was an action block, it becomes a section grouping its children).
-6. Update `prose/structure.fountain`: add matching skeleton nodes.
-7. Append to `csvs/source-child.csv`, `csvs/structure-child.csv`, `csvs/source-structure.csv`.
+5. Update `prose/source.fountain`: if deepened, the original action block becomes a heading grouping its children; if flattened, the original is replaced by N action blocks.
+6. Update `prose/structure.fountain`: add or replace matching skeleton nodes.
+7. Update `csvs/source-child.csv`, `csvs/structure-child.csv`, `csvs/source-structure.csv` with new edges.
 8. Print confirmation with new leaf count and their line numbers.
 
 **Guard:** refuse to split a leaf whose corresponding structure node has a non-empty annotation. This prevents orphaning annotations. The translator must be in the split or pre-annotate stage for that leaf.

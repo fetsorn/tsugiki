@@ -255,6 +255,7 @@ pub struct SplitResult {
     pub new_source_edges: Vec<ContainmentEdge<Source>>,
     pub new_structure_edges: Vec<ContainmentEdge<Structure>>,
     pub new_bridges: Vec<SourceStructureBridge>,
+    pub flattened: bool, // true if depth-4 flatten, false if normal deepen
 }
 
 pub fn split_leaf(
@@ -264,8 +265,10 @@ pub fn split_leaf(
 ) -> Result<SplitResult, SplitError> {
     // Validate concatenation matches original (modulo whitespace)
     // Refuse if original has an annotation (is_annotated check via bridge)
-    // Create N new source leaves at depth = original.depth + 1
-    // Original becomes an inner node; new leaves are its children
+    // If original.depth < max_depth:
+    //   Original becomes an inner node; new leaves at depth+1 are its children
+    // If original.depth == max_depth:
+    //   Original is removed; new leaves at same depth replace it under same parent
     // Create matching structure skeleton nodes and bridges
 }
 ```
@@ -280,7 +283,7 @@ The following properties are tested with `proptest` using randomly generated tre
 4. **Fountain roundtrip**: `parse(render(tree)) ≅ tree` (structural equality, ignoring whitespace).
 5. **CSV roundtrip**: `parse_csv(render_csv(edges)) == edges`.
 6. **Streaming equivalence**: for any tree, `MemTree` and `FountainWalk` return the same results for all `TreeWalk` methods.
-7. **Split validity**: after splitting a leaf, the tree still satisfies all invariants, and the new leaves' content concatenates to the original.
+7. **Split validity**: after splitting a leaf, the tree still satisfies all invariants, the new leaves are at depth+1 (or same depth if at max depth), and their content concatenates to the original.
 
 Random tree generation respects the depth ordering:
 

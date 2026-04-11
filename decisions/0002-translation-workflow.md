@@ -44,17 +44,19 @@ Split operates on a single leaf at a time. It has two modes:
 
 **Get mode.** The translator points at a leaf node. The CLI prints its text. Nothing is written.
 
-**Put mode.** The translator provides the same text back, broken into multiple lines. Each line becomes a new leaf node. The CLI validates that the concatenation of the input lines matches the original text (modulo whitespace) — split is a scalpel, not a pen. The original leaf is replaced by N sibling leaves under the same parent. The parent's depth does not change; the new leaves are one level deeper. New structure skeleton nodes are created for each new leaf, and bridge edges connect them.
+**Put mode.** The translator provides the same text back, broken into multiple lines. Each line becomes a new leaf node. The CLI validates that the concatenation of the input lines matches the original text (modulo whitespace) — split is a scalpel, not a pen.
+
+If the leaf is above maximum depth, the original leaf becomes an inner node and the new leaves are its children at depth+1. If the leaf is already at maximum depth (depth 4), the original is replaced by N sibling leaves at the same depth under the same parent — flattening, because there is nowhere deeper to go. New structure skeleton nodes are created for each new leaf, and bridge edges connect them.
 
 If the translator provides a single line (or the same text unsplit), nothing happens.
 
 Split is the recommended second phase, but it is available anytime before a leaf is annotated. Once a leaf has a structure annotation, splitting it would orphan that annotation, so the CLI refuses to split annotated leaves. This flexibility allows the translator to discover during annotate that a leaf is too coarse and go back to split it before continuing.
 
 **Artifacts modified:**
-- `prose/source.fountain` — leaf replaced by multiple finer leaves.
-- `prose/structure.fountain` — matching skeleton nodes added.
-- `csvs/source-child.csv` — new containment edges.
-- `csvs/structure-child.csv` — new containment edges.
+- `prose/source.fountain` — leaf replaced by multiple finer leaves (as children if depth < 4, as siblings if depth = 4).
+- `prose/structure.fountain` — matching skeleton nodes added or replaced accordingly.
+- `csvs/source-child.csv` — new containment edges (parent→children if deepened, or replacement edges if flattened).
+- `csvs/structure-child.csv` — same pattern.
 - `csvs/source-structure.csv` — new bridge edges for the new leaves.
 
 **In AI-assisted mode**, the AI calls split in get mode, reads the paragraph text, asks the translator "where are the joints?", and constructs the put-mode input from the translator's answer. The AI never modifies the source text — it only cuts where the translator indicates.

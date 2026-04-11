@@ -44,6 +44,8 @@ No depth level is privileged. The system does not have a concept of "sentence le
 
 Leaves may exist at different depths within the same tree. A translator might split one paragraph into five leaves while leaving another paragraph as a single leaf. Both are valid decompositions.
 
+Split behaves differently depending on depth. If the leaf is above the maximum depth, it becomes an inner node and the new leaves are its children at depth+1. If the leaf is already at maximum depth (depth 4), it is replaced by N sibling leaves at the same depth under the same parent — flattening, because there is no deeper level to go to.
+
 ### Prose lives in Fountain files
 
 Each tree is stored as a single Fountain file: `source.fountain`, `structure.fountain`, `target.fountain`.
