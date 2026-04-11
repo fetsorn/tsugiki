@@ -19,14 +19,12 @@ The layered plan (types → memtree → serialization → streaming → parser) 
 
 Single binary crate. No library separation yet.
 
-```
-tsugiki/
-  src/
-    main.rs        — clap dispatch + all logic
-  Cargo.toml
-```
-
-Dependencies: `clap` (derive), `uuid`, `regex` (for Fountain parsing).
+Dependencies: 
+- `clap` (derive)
+- `uuid` 
+- `regex`
+- https://github.com/coignard/lottie/blob/main/src/parser.rs for Fountain parsing
+- ~/mm/codes/csvs-rs/ for csvs reads and writes
 
 ## Fountain conventions
 
