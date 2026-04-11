@@ -80,6 +80,12 @@ Depth values are internal to the tree. In user-facing output, the CLI displays d
 
 Footnotes — citations, hedges, tangential remarks, digressions the author could not resist — are outside the communicative intent of the text. They do not participate in the rhetorical arc. Footnote handling (reference edges, render-time numbering, graph traversal for correspondence) is deferred to a later layer. The main loop (init → split → annotate → regrow → render) must be solid before footnotes are added as a sidecar.
 
+### Source of truth
+
+CSVS tablets are the authority on the DAG: containment, depth, and provenance edges. Fountain files are the authority on which prose relates to a given UUID. The two complement each other — CSVS says how nodes connect, Fountain says what they contain. If they disagree, CSVS wins on structure, Fountain wins on content.
+
+Fountain files use shortened hex IDs (first N characters of the full UUID) as references into the authoritative DAG in CSVS. The short ID is a serialization convenience; the full UUID in CSVS is the stable identity.
+
 ### Relationships live in CSVS
 
 CSVS tablets store only UUID-to-UUID relationships, never arbitrary text:

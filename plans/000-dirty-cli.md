@@ -74,13 +74,13 @@ No sentence splitting. Paragraphs are the initial leaves. The translator refines
 
 If the intent directory already contains artifacts, `init` refuses to overwrite. The translator must `reset` first or start in an empty directory.
 
-### `tsugiki split <addr>`
+### `tsugiki split get <addr>`
 
-Split has two modes based on the presence of stdin.
+Resolve `<addr>` to a leaf node in `source.fountain`. Print its text to stdout. Nothing is written.
 
-**Get mode** (no stdin): resolve `<addr>` to a leaf node in `source.fountain`. Print its text to stdout. Nothing is written.
+### `tsugiki split put <addr> < input`
 
-**Put mode** (stdin present): read lines from stdin. Each line becomes a new leaf node.
+Read lines from stdin. Each line becomes a new leaf node.
 
 1. Concatenate input lines (stripping whitespace) and compare against the original leaf text. If they don't match, error — split is cutting, not editing.
 2. If input is a single line matching the original, no-op.
@@ -189,7 +189,7 @@ Line numbers are the most natural for interactive use. They are never stored —
 
 - Does `tsugiki init` produce well-formed source and structure trees from markdown?
 - Does the `[[note]]` Fountain convention read and write cleanly?
-- Does `tsugiki split` (get/put) feel natural for decomposing paragraphs into working units?
+- Does `tsugiki split get` / `tsugiki split put` feel natural for decomposing paragraphs into working units?
 - Does `tsugiki next` → `tsugiki annotate` → `tsugiki next` feel like a natural loop for the annotate phase?
 - Does `tsugiki next` → `tsugiki regrow` → `tsugiki next` feel natural for the regrow phase?
 - Does the streaming write (temp file + replace) work reliably?

@@ -60,9 +60,17 @@ Split is the recommended second phase, but it is available anytime before a leaf
 
 **In AI-assisted mode**, the AI calls split in get mode, reads the paragraph text, asks the translator "where are the joints?", and constructs the put-mode input from the translator's answer. The AI never modifies the source text — it only cuts where the translator indicates.
 
+### Traversal order
+
+Annotate and regrow walk the tree in different orders, because they serve different cognitive tasks.
+
+**Annotate is breadth-first.** The translator walks all nodes at depth 0, then all nodes at depth 1, then all nodes at depth 2, and so on. This is the understanding pass — the translator needs to name the large rhetorical moves before naming the fine ones. Annotating a section heading ("you rock!") before its sentence leaves ("anniversary marks a summit of growth") gives the leaves a frame to land in. Breadth-first matches the cognitive order of comprehension: grasp the whole, then the parts.
+
+**Regrow is depth-first.** The translator walks siblings in order, descending into children before moving to the next sibling. This is the writing pass — the translator needs to produce text that reads as continuous prose. Writing the sentences of paragraph 3 before jumping to paragraph 4 keeps the translator inside one rhetorical unit, which is where local coherence decisions (word choice, rhythm, connectives) are made. Depth-first matches the cognitive order of composition: finish one thought, then start the next.
+
 ### Phase 3: Annotate
 
-The translator walks the structure tree node by node and writes a short annotation for each — naming what that piece of the text is doing, not what it says.
+The translator walks the structure tree breadth-first — all nodes at depth 0, then depth 1, then depth 2 — and writes a short annotation for each, naming what that piece of the text is doing, not what it says.
 
 The annotations are written in whatever language the translator thinks in. They are informal, often blunt. "pharaoh addressing pharaoh" or "you rock!" — the point is to name the rhetorical move so precisely that someone who does not speak the source language could reconstruct the intent from the structure tree alone.
 
@@ -81,7 +89,7 @@ Both inner nodes (headings) and leaf nodes receive annotations. A heading-level 
 
 ### Phase 4: Regrow
 
-The translator walks the structure tree and, for each structure leaf, writes target text that expresses that meaning in the target language. Each invocation of the regrow command creates exactly one target leaf node.
+The translator walks the structure tree depth-first — siblings in order, descending into children before the next sibling — and for each structure leaf, writes target text that expresses that meaning in the target language. Each invocation of the regrow command creates exactly one target leaf node.
 
 - **1:N split**: a single structure node needs multiple target leaves — the translator calls regrow multiple times against the same structure node.
 - **N:1 merge**: multiple structure nodes are expressed by one target sentence — the translator calls regrow once, citing multiple structure nodes as provenance.
@@ -141,3 +149,7 @@ Archives are never overwritten. If the translator resets twice in one day, both 
 - Regrow supports 1:N, N:1, and 1:1 mappings between structure and target. The provenance DAG grows naturally as the translator works.
 - Reset is archive-and-regenerate, not rollback. The archived file is always available. The regeneration is deterministic from the previous phase's output.
 - Footnotes are deferred (ADR-0001). The main loop must prove itself first.
+
+## Future work
+
+- **Single-node undo.** `tsugiki undo <addr>` would reverse a single annotate or regrow operation — clearing one annotation, or removing one target leaf and its bridge/containment edges. Reset archives an entire phase, but the common mistake is one bad annotation or one regrown node with a typo. Without node-level undo, the translator must hand-edit Fountain *and* delete CSV rows, which is error-prone. Not needed for the dirty CLI prototype, but should be added once the main loop is proven.
