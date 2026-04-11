@@ -59,7 +59,7 @@ Seven commands. That is the API for Layer -1.
 Parse a well-formed markdown file into source and structure trees. The CLI looks for `prose/` and `csvs/` in the current directory — the translator `cd`s into the intent directory (git model, no `--dir` flag).
 
 1. Read the markdown file. Extract headings (depth levels) and paragraph blocks (text between blank lines under a heading).
-2. Assign UUIDs to every node. Headings become inner nodes, paragraphs become leaves. Generate the source tree (containment edges) and the structure skeleton (matching containment edges, empty content).
+2. Assign UUIDs to every node. Headings become inner nodes, paragraphs become leaves. Generate the source tree (containment edges) and a 1:1 structure scaffold (matching containment edges, empty content). This scaffold is the starting point — the translator reshapes the provenance DAG through split, annotate, and regrow.
 3. Write artifacts:
    - `prose/source.fountain` — the full source text with `[[hex-id]]` on each heading and action line.
    - `prose/structure.fountain` — the structure skeleton: headings with `[[hex-id]]` and no titles, action lines with `[[hex-id]]` and no text.
@@ -92,7 +92,9 @@ Split has two modes based on the presence of stdin.
 7. Update `csvs/source-child.csv`, `csvs/structure-child.csv`, `csvs/source-structure.csv` with new edges.
 8. Print confirmation with new leaf count and their line numbers.
 
-**Guard:** refuse to split a leaf whose corresponding structure node has a non-empty annotation. This prevents orphaning annotations. The translator must be in the split or pre-annotate stage for that leaf.
+**Guard:** refuse to split a source leaf whose corresponding structure node has a non-empty annotation. This prevents orphaning annotations. The translator must be in the split or pre-annotate stage for that leaf.
+
+**Splitting structure nodes:** `tsugiki split <addr>` also works on structure leaves (resolved in `structure.fountain`). The same get/put interface applies — the translator splits the annotation text. New structure nodes inherit the source bridge edges from the original (the source nodes now feed multiple structure nodes). Refuse to split a structure node that already has target edges.
 
 ### `tsugiki next`
 
@@ -143,15 +145,17 @@ The write is a streaming transformation: read the file line by line, write to a 
 
 No CSV writes. The bridge and containment tablets were populated at init and split time.
 
-### `tsugiki regrow <addr> "<text>"`
+### `tsugiki regrow <addr>[,<addr>...] "<text>"`
 
-1. Resolve `<addr>` to a structure leaf node.
+1. Resolve each `<addr>` to a structure leaf node. Multiple addresses (comma-separated) certify a merge: one target leaf expressing multiple structure nodes.
 2. Generate a new UUID for the target node.
 3. Determine the target's parent: find the structure node's parent in `structure-child.csv`, then find whether that parent structure node already has target children via `structure-target.csv` and `target-child.csv`. If the parent-level target heading does not exist, create it (auto-generating the block-level target node, same pattern as the structure skeleton auto-generation at init time).
 4. Append to `target.fountain`: the target text as an action block with `[[new-uuid]]`, under the appropriate heading.
 5. Append to `csvs/target-child.csv`: the containment edge.
-6. Append to `csvs/structure-target.csv`: the bridge edge.
+6. Append to `csvs/structure-target.csv`: one bridge edge per cited structure node.
 7. Print confirmation.
+
+A single structure node called multiple times → 1:N split (multiple target leaves). Multiple structure nodes in one call → N:1 merge (one target leaf, multiple provenance edges).
 
 ### `tsugiki render <tree>`
 
@@ -193,6 +197,9 @@ Line numbers are the most natural for interactive use. They are never stored —
 - Can a translator make progress on real intents using only this CLI?
 - Does splitting mid-annotate work smoothly, or does it create friction?
 - Does `tsugiki show` provide enough context for orientation?
+- Does the N:1 merge in regrow (multiple structure addrs) feel natural?
+- Does splitting structure nodes during annotate reshape the DAG cleanly?
+- Does provenance visibility (orphan detection) help the translator or get in the way?
 
 ## Done when
 

@@ -22,25 +22,36 @@ Tsugiki needs a data model that captures this process faithfully. The model must
 
 ## Decision
 
-### Three trees, structural fidelity
+### Three trees, one root, provenance DAG
 
-Translation is modeled as three trees that share a single abstract root: the communicative intent of the text.
+Translation is modeled as three trees that share a single abstract root: the communicative intent of the text. Each tree is an independent structure — its own shape, its own depth, its own branching — but all three are expressions of the same communicative act. The shared root is not a stored node; it is the conceptual anchor that makes the three trees one translation rather than three unrelated documents.
 
 **Source tree.** A structural decomposition of the original text. Parent-child means containment: a chapter contains paragraphs, a paragraph contains its working units. The order of siblings is the author's ordering and is significant.
 
-**Structure tree.** A rhetorical decomposition of communicative intent. It mirrors the shape of the source tree — the same nesting, the same branching — but parent-child means "is expressed through these sub-meanings." Siblings are semantically unordered but pragmatically file-ordered. what matters is which structure nodes are children of which. Each structure node carries a short annotation in whatever language the translator thinks in, naming the rhetorical move precisely enough that someone who does not speak the source language could reconstruct the intent of the text from the structure tree alone.
+**Structure tree.** A rhetorical decomposition of communicative intent. Parent-child means "is expressed through these sub-meanings." The structure tree has its own shape — it need not mirror the source tree's branching. Siblings are semantically unordered but pragmatically file-ordered. Each structure node carries a short annotation in whatever language the translator thinks in, naming the rhetorical move precisely enough that someone who does not speak the source language could reconstruct the intent of the text from the structure tree alone.
 
 **Target tree.** A structural decomposition of the translated text. Same containment logic as the source tree. The order of siblings is the translator's ordering and may differ from the source ordering.
 
-**Structural fidelity.** The source tree and structure tree are isomorphic in shape: for every source node there is exactly one structure node, and vice versa, and the parent-child relationships match. This isomorphism is what makes the output a translation rather than an adaptation or a work inspired by the source. Breaking this constraint — adding a structure node with no source counterpart, or merging two source nodes into one structure node — is a decision to leave the tsugiki workflow. The tool does not forbid it; it stops being the right tool.
+### Provenance, not isomorphism
 
-The target tree is where the isomorphism breaks. A single structure node can produce multiple target leaves (1:N in `structure-target.csv`). The translator may reorder, split, or merge at the leaf level in the target, but the decomposition of meaning is fixed.
+The bridges between trees (`source-structure.csv`, `structure-target.csv`) are many-to-many edge lists forming a directed acyclic graph of provenance.
+
+- One source node may feed multiple structure nodes (the source text expresses several rhetorical moves).
+- Multiple source nodes may feed one structure node (several source passages serve one rhetorical function).
+- One structure node may produce multiple target leaves (splitting for the target language's needs).
+- Multiple structure nodes may be expressed by one target leaf (the translator merges two moves into one sentence).
+
+**The provenance invariant.** Every target node must trace back through at least one structure node to at least one source node. This path is the translator's certification: "this target text expresses *these* meanings, which come from *these* source passages." A target node with no structure edge, or a structure node with no source edge, is an **orphan** — visible evidence that the translator introduced something not grounded in the source.
+
+The system does not forbid orphans. It makes them visible. A translator may add a clarifying sentence that has no source counterpart — but the provenance graph shows this clearly as an interpretive addition rather than a translation. This visibility is the discipline: not a wall, but a mirror.
+
+**Init produces a 1:1 scaffold.** When a source text is first parsed, the system generates a default 1:1 mapping between source and structure nodes — one structure node per source node, same shape. This scaffold is a convenience, not a law. The translator reshapes the DAG through split, annotate, and regrow as they discover the text's actual rhetorical structure.
 
 ### Leaves are the working unit
 
 The translator works leaf by leaf. A leaf is any node with no children — the smallest unit the translator chose to work with in this particular decomposition. What a leaf contains is the translator's judgment: it might be one grammatical sentence, three short sentences that function as a single rhetorical move, or half a sentence that the translator decided to treat separately.
 
-No depth level is privileged. The system does not have a concept of "sentence level" — it has leaves and inner nodes. Leaves are the units of annotation (each leaf gets one structure annotation) and the units of regrow (each structure leaf maps to one or more target leaves). Inner nodes provide grouping and context.
+No depth level is privileged. The system does not have a concept of "sentence level" — it has leaves and inner nodes. Leaves are the units of annotation and the units of regrow. Inner nodes provide grouping and context.
 
 Leaves may exist at different depths within the same tree. A translator might split one paragraph into five leaves while leaving another paragraph as a single leaf. Both are valid decompositions.
 
@@ -78,8 +89,8 @@ CSVS tablets store only UUID-to-UUID relationships, never arbitrary text:
 | `source-child.csv`     | Structural containment within the source tree         |
 | `target-child.csv`     | Structural containment within the target tree         |
 | `structure-child.csv`  | Depth relationships within the structure tree         |
-| `source-structure.csv` | Which structure node corresponds to each source node  |
-| `structure-target.csv` | Which target node(s) express each structure node      |
+| `source-structure.csv` | Provenance: which source nodes feed each structure node (N:M) |
+| `structure-target.csv` | Provenance: which structure nodes certify each target node (N:M) |
 
 Schema (`_-_.csv`):
 ```
@@ -117,6 +128,7 @@ Each translation intent is its own directory with its own version control:
 - Fountain files serve as the single source of truth for all prose. They are human-readable, preserve structural context, and stream line-by-line.
 - CSVS handles what it handles well: typed relationships between identifiers. No tablet contains arbitrary text.
 - The structure tree is the shared ground between source and target. It is where AI and translator meet to discuss options — by referencing structure nodes, not by generating target-language text.
-- Structural fidelity (source-structure isomorphism) is the defining constraint. It makes the three-tree workflow a tool for translation, not for adaptation or creative rewriting.
+- The provenance DAG is the defining discipline. It does not enforce shape — it enforces traceability. Every target word traces back to source through structure. Orphan nodes are visible, not forbidden — the translator can add interpretive content, but cannot hide it.
+- Init produces a 1:1 scaffold as a starting point. The translator reshapes the DAG as understanding deepens. The scaffold is a convenience, not a constraint.
 - Leaves are the working unit. No depth level is privileged. The translator controls the granularity of decomposition, and the system supports uneven leaf depths within a single tree.
 - Footnotes are deferred. The main loop must prove itself before the sidecar complexity of footnote edges, render-time numbering, and graph-traversed correspondence is added.

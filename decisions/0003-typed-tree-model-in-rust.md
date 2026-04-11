@@ -14,8 +14,7 @@ The three-tree data model (ADR-0001) and the translation workflow (ADR-0002) des
 The trees have structural invariants that are never enforced by code:
 
 - Each tree has a depth ordering where a child is exactly one level deeper than its parent. The number of levels varies by intent — a letter might have three, a monograph chapter four. The system enforces the relative invariant (child depth = parent depth + 1), not a fixed set of named levels.
-- The source and structure trees are isomorphic in shape: they have the same branching structure, the same nesting, and a 1:1 correspondence at every position in the tree (structural fidelity, ADR-0001).
-- Cross-tree bridges (source→structure, structure→target) connect nodes of matching structural role. The isomorphism preserves tree shape, not depth numbers — though in practice, corresponding nodes are at the same depth because the trees mirror each other.
+- Cross-tree bridges (source→structure, structure→target) form a many-to-many provenance DAG. Every target node must trace back through structure to source (provenance invariant, ADR-0001). Orphan nodes are visible, not forbidden.
 - Source and target trees have ordered siblings (file order matters). The structure tree has unordered siblings.
 - Leaves may exist at different depths within the same tree, because the translator can split some paragraph leaves into finer units while leaving others intact.
 
@@ -125,7 +124,7 @@ impl<T: TreeKind> ContainmentEdge<T> {
 }
 ```
 
-**Bridge edge** validates structural correspondence at construction:
+**Bridge edge** records a provenance link between trees:
 
 ```rust
 pub struct BridgeEdge<From: TreeKind, To: TreeKind> {
@@ -135,12 +134,11 @@ pub struct BridgeEdge<From: TreeKind, To: TreeKind> {
 }
 
 impl<F: TreeKind, T: TreeKind> BridgeEdge<F, T> {
-    pub fn new(from: &Node<F>, to: &Node<T>) -> Result<Self, TreeError> {
-        // Bridge edges connect nodes that occupy the same position
-        // in the tree isomorphism. In practice this means matching depth,
-        // but the semantic invariant is shape-isomorphism, validated
-        // at the tree level by validate_parse, not at the edge level.
-        Ok(BridgeEdge { from: from.uuid, to: to.uuid, _marker: PhantomData })
+    pub fn new(from: &Node<F>, to: &Node<T>) -> Self {
+        // Bridge edges are N:M — no structural constraint at the edge level.
+        // The provenance invariant (every target traces to source through
+        // structure) is validated at the graph level, not at edge construction.
+        BridgeEdge { from: from.uuid, to: to.uuid, _marker: PhantomData }
     }
 }
 
@@ -192,7 +190,7 @@ pub trait BridgeWalk<From: TreeKind, To: TreeKind> {
 }
 ```
 
-Bridge methods return `Vec` because a single structure node can produce multiple target leaves (1:N in `structure-target.csv`).
+Bridge methods return `Vec` because bridges are N:M — a single source node may feed multiple structure nodes, and a single structure node may be expressed by multiple target leaves (or vice versa).
 
 **Streaming implementation** (`CsvBridgeWalk<From, To>`) holds the path to the bridge CSV. Each method is a grep.
 
@@ -225,8 +223,8 @@ pub fn validate_parse(result: &ParseResult) -> Result<(), Vec<TreeError>> {
     // Check: every non-root node has exactly one parent
     // Check: no cycles
     // Check: all UUIDs in edges appear in nodes
-    // Check: source-structure bridge is 1:1 (structural fidelity)
-    // Check: source and structure trees have the same shape
+    // Check: every structure node has at least one source edge (warn on orphans)
+    // Check: every target node has at least one structure edge (warn on orphans)
 }
 ```
 
@@ -267,11 +265,12 @@ The following properties are tested with `proptest` using randomly generated tre
 
 1. **Depth monotonicity**: for every containment edge, child depth = parent depth + 1.
 2. **Single parent**: every non-root node has exactly one parent.
-3. **Shape isomorphism**: source-structure bridge preserves tree shape (same branching, same nesting).
+3. **Provenance connectivity**: every target node traces back through at least one structure node to at least one source node. Orphan nodes are flagged as warnings.
 4. **Fountain roundtrip**: `parse(render(tree)) ≅ tree` (structural equality, ignoring whitespace).
 5. **CSV roundtrip**: `parse_csv(render_csv(edges)) == edges`.
 6. **Streaming equivalence**: for any tree, `MemTree` and `FountainWalk` return the same results for all `TreeWalk` methods.
 7. **Split validity**: after splitting a leaf, the tree still satisfies all invariants, the new leaves are at depth+1 (or same depth if at max depth), and their content concatenates to the original.
+8. **DAG acyclicity**: the provenance graph (source → structure → target) has no cycles.
 
 Random tree generation respects the depth ordering:
 
@@ -307,8 +306,9 @@ The `<addr>` parameter accepts a line number, a short hex ID, or a full UUID. Li
 
 - Every tree operation goes through a validated constructor. Depth mismatches, malformed edges, and invalid bridges become construction-time errors, not silent data corruption.
 - The `TreeWalk` trait abstracts over storage. Tests use `MemTree`; the CLI uses `FountainWalk`. Both satisfy the same properties, verified by proptest.
-- The parser produces both source and structure trees from markdown, with structural fidelity enforced at parse time. No sentence splitting — the parser handles only what markdown makes unambiguous.
+- The parser produces both source and structure trees from markdown, with a 1:1 scaffold as starting point. No sentence splitting — the parser handles only what markdown makes unambiguous.
 - The split operation is validated separately: concatenation check, annotated-leaf guard, and invariant preservation.
 - The streaming design means the CLI never loads a full file. Every operation is a stateless grep — no cached line index, no stale state.
 - Property-based tests provide confidence that invariants hold for arbitrary trees, including trees with leaves at varying depths.
 - The type system prevents passing a source UUID to a function expecting a target UUID, constructing a bridge between source and target directly (bypassing structure), or creating a containment edge between nodes of incompatible depths.
+- Bridge edges are N:M with no structural constraint at the edge level. The provenance invariant is validated at the graph level — orphan nodes produce warnings, not errors, making interpretive additions visible rather than forbidden.

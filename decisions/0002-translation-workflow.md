@@ -17,9 +17,9 @@ The workflow must work in two modes: an AI-assisted session where the translator
 
 The translator provides a source text as a well-formed markdown file. Markdown input is required — the parser needs unambiguous structure (headings for sections, paragraphs for blocks). Plain text input is not supported because recovering structure from unformatted prose is unreliable.
 
-The parser reads the markdown, extracts the heading hierarchy and paragraph blocks, and produces the source tree and the structure tree skeleton simultaneously. Headings become inner nodes at the appropriate depth. Each paragraph — a block of text between blank lines — becomes a leaf node. No sentence splitting is performed. The paragraph is the initial leaf granularity.
+The parser reads the markdown, extracts the heading hierarchy and paragraph blocks, and produces the source tree and an initial structure tree skeleton simultaneously. Headings become inner nodes at the appropriate depth. Each paragraph — a block of text between blank lines — becomes a leaf node. No sentence splitting is performed. The paragraph is the initial leaf granularity.
 
-Because of the structural fidelity invariant (ADR-0001), every source node gets a shadow structure node with matching tree position, and the bridge tablets (`source-structure.csv`, `source-child.csv`, `structure-child.csv`) are fully populated at this step.
+Init produces a **1:1 scaffold**: every source node gets a shadow structure node with matching tree position, and the bridge tablets (`source-structure.csv`, `source-child.csv`, `structure-child.csv`) are fully populated. This scaffold is the translator's starting point — subsequent phases reshape the provenance DAG as the translator discovers the text's actual rhetorical structure.
 
 The structure skeleton in `structure.fountain` comes out with headings that carry UUIDs but no titles, and action blocks that carry UUIDs but no text. The annotate phase fills in the annotations. The heading-level structure nodes will receive their annotations during annotate, the same as leaf nodes.
 
@@ -43,11 +43,13 @@ Split operates on a single leaf at a time. It has two modes:
 
 **Put mode.** The translator provides the same text back, broken into multiple lines. Each line becomes a new leaf node. The CLI validates that the concatenation of the input lines matches the original text (modulo whitespace) — split is a scalpel, not a pen.
 
-If the leaf is above maximum depth, the original leaf becomes an inner node and the new leaves are its children at depth+1. If the leaf is already at maximum depth (depth 4), the original is replaced by N sibling leaves at the same depth under the same parent — flattening, because there is nowhere deeper to go. New structure skeleton nodes are created for each new leaf, and bridge edges connect them. In both cases, the old bridge edge (original source node → original structure node) and the old containment edges are removed and replaced by the new ones. The original UUIDs are retired — no dangling references survive the split.
+If the leaf is above maximum depth, the original leaf becomes an inner node and the new leaves are its children at depth+1. If the leaf is already at maximum depth (depth 4), the original is replaced by N sibling leaves at the same depth under the same parent — flattening, because there is nowhere deeper to go. New structure skeleton nodes are created for each new leaf, and bridge edges connect them (inheriting the original's bridge edges — all new leaves initially point to the same structure node that the original pointed to, forming N:1 in `source-structure.csv`). The original source UUID is retired.
 
 If the translator provides a single line (or the same text unsplit), nothing happens.
 
 Split is the recommended second phase, but it is available anytime before a leaf is annotated. Once a leaf has a structure annotation, splitting it would orphan that annotation, so the CLI refuses to split annotated leaves. This flexibility allows the translator to discover during annotate that a leaf is too coarse and go back to split it before continuing.
+
+**Splitting structure nodes.** The translator may also split a structure node — discovering during annotate that one rhetorical unit actually serves two distinct moves. This creates new structure nodes, each inheriting the source bridge edges from the original. The provenance DAG reshapes naturally: the source nodes now feed multiple structure nodes.
 
 **Artifacts modified:**
 - `prose/source.fountain` — leaf replaced by multiple finer leaves (as children if depth < 4, as siblings if depth = 4).
@@ -79,7 +81,13 @@ Both inner nodes (headings) and leaf nodes receive annotations. A heading-level 
 
 ### Phase 4: Regrow
 
-The translator walks the structure tree and, for each structure leaf, writes target text that expresses that meaning in the target language. Each invocation of the regrow command creates exactly one target leaf node. If a single structure node needs multiple target leaves (1:N in `structure-target.csv`), the translator calls regrow multiple times against the same structure node. The target tree may differ from the source tree in sequence, in the number of leaves per block, and in block structure — but every target leaf traces back to a structure node.
+The translator walks the structure tree and, for each structure leaf, writes target text that expresses that meaning in the target language. Each invocation of the regrow command creates exactly one target leaf node.
+
+- **1:N split**: a single structure node needs multiple target leaves — the translator calls regrow multiple times against the same structure node.
+- **N:1 merge**: multiple structure nodes are expressed by one target sentence — the translator calls regrow once, citing multiple structure nodes as provenance.
+- **1:1**: the common case, one structure leaf produces one target leaf.
+
+The target tree may differ from the source tree in sequence, in the number of leaves per block, and in block structure — but every target leaf traces back through at least one structure node to at least one source node. This is the provenance invariant (ADR-0001).
 
 This is where the translator's craft lives. The AI does not write target-language text. In AI-assisted mode, the AI can ask about choices: "the source packs two ideas into one unit — are you keeping that or splitting?" But the words are the translator's.
 
@@ -124,11 +132,12 @@ Archives are never overwritten. If the translator resets twice in one day, both 
 
 ## Consequences
 
-- Init is fully mechanical. It takes what markdown can reliably tell us about structure — headings and paragraph blocks — and builds the tree skeleton. No language-specific heuristics, no sentence detection, no ambiguity.
-- Split separates the human judgment (where are the joints?) from the mechanical work (UUID assignment, edge creation, skeleton extension). The translator controls granularity entirely.
+- Init is fully mechanical. It takes what markdown can reliably tell us about structure — headings and paragraph blocks — and builds a 1:1 scaffold. No language-specific heuristics, no sentence detection, no ambiguity.
+- Split separates the human judgment (where are the joints?) from the mechanical work (UUID assignment, edge creation, skeleton extension). The translator controls granularity entirely. Split works on both source leaves (creating finer source nodes) and structure leaves (discovering finer rhetorical units).
 - The get/put interface for split means the translator never retypes text. They copy the CLI output, add line breaks, and pipe it back. The concatenation check ensures no accidental edits.
 - Split is available on unannotated leaves at any time, giving the translator flexibility to refine granularity during annotate without restarting the workflow.
 - The annotate phase is a streaming read-write on one file — no CSV operations, no insertion logic beyond overwriting empty annotations.
 - No cursor file is needed. The CLI derives position from the file state. This eliminates a class of synchronization bugs.
+- Regrow supports 1:N, N:1, and 1:1 mappings between structure and target. The provenance DAG grows naturally as the translator works.
 - Reset is archive-and-regenerate, not rollback. The archived file is always available. The regeneration is deterministic from the previous phase's output.
 - Footnotes are deferred (ADR-0001). The main loop must prove itself first.
