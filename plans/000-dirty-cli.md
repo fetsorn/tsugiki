@@ -23,6 +23,7 @@ Dependencies:
 - `clap` (derive)
 - `uuid` 
 - `regex`
+- `markdown` to_mdast
 - https://github.com/coignard/lottie/blob/main/src/parser.rs for Fountain parsing
 - ~/mm/codes/csvs-rs/ for csvs reads and writes
 
