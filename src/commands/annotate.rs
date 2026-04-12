@@ -74,6 +74,7 @@ pub async fn run(
 
     // Structure UUID not in fountain yet — find parent via structure-child.csv
     let parent_short = lookup_parent_structure(&csvs_dir, &struct_short)
+        .await
         .ok_or_else(|| {
             format!("No parent found for structure [{struct_short}] in structure-child.csv")
         })?;
@@ -253,19 +254,35 @@ async fn lookup_structure_for_source(csvs_dir: &Path, source_short: &str) -> Opt
 }
 
 /// Look up the parent structure short ID for a child structure short ID via structure-child.csv.
-/// Reads the CSV directly — each line is "parent_uuid,child_uuid".
-fn lookup_parent_structure(csvs_dir: &Path, child_short: &str) -> Option<String> {
-    let csv_path = csvs_dir.join("structure-child.csv");
-    let content = fs::read_to_string(&csv_path).ok()?;
+async fn lookup_parent_structure(csvs_dir: &Path, child_short: &str) -> Option<String> {
+    let dir = PathBuf::from(csvs_dir);
+    let dataset = Dataset::open(&dir).await.ok()?;
 
-    for line in content.lines() {
-        let mut parts = line.splitn(2, ',');
-        let parent_full = parts.next()?;
-        let child_full = parts.next()?;
-        let child_s = child_full.split('-').next().unwrap_or(child_full);
-        if child_s == child_short {
-            let parent_s = parent_full.split('-').next().unwrap_or(parent_full);
-            return Some(parent_s.to_string());
+    let query = Entry {
+        base: "structure".to_string(),
+        base_value: None,
+        leader_value: None,
+        leaves: std::collections::HashMap::from([(
+            "child".to_string(),
+            vec![Entry::new("child")],
+        )]),
+    };
+
+    let results: Vec<Entry> = dataset.select_record(vec![query]).await.ok()?;
+
+    for entry in &results {
+        if let Some(leaves) = entry.leaves.get("child") {
+            for l in leaves {
+                if let Some(child_full) = &l.base_value {
+                    let short = child_full.split('-').next().unwrap_or(child_full);
+                    if short == child_short {
+                        if let Some(parent_full) = &entry.base_value {
+                            let parent_short = parent_full.split('-').next().unwrap_or(parent_full);
+                            return Some(parent_short.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -7,11 +7,16 @@ use crate::scan;
 use crate::types::{Addr, ScannedNode, TreeKind};
 
 /// Display a node with full context: text, parent, children, bridge counterparts, notes.
+///
+/// For hex addresses, returns the first match (IDs are unique across trees).
+/// For line numbers, shows matches across all trees (line numbers are per-file).
 pub async fn run(intent_dir: &Path, addr_str: &str) -> Result<(), String> {
     let addr = Addr::parse(addr_str);
+    let show_all = matches!(addr, Addr::Line(_));
 
-    // Try to find the node in each tree
     let trees = [TreeKind::Source, TreeKind::Structure, TreeKind::Target];
+    let csvs_dir = intent_dir.join("csvs");
+    let mut found = false;
 
     for kind in &trees {
         let path = intent_dir.join("prose").join(kind.fountain_filename());
@@ -21,55 +26,65 @@ pub async fn run(intent_dir: &Path, addr_str: &str) -> Result<(), String> {
 
         let nodes = scan::scan_all(&path);
         if let Some(node) = resolve::resolve(&nodes, &addr) {
-            // Found it
-            println!("[{:?}] L{} [{}]", kind, node.line_number, node.id.short);
-
-            if let Some(d) = node.depth {
-                println!("  depth: {d}");
-            } else {
-                println!("  (action block)");
+            if found {
+                println!();
             }
+            found = true;
 
-            if node.text.is_empty() {
-                println!("  text: (empty)");
-            } else {
-                println!("  text: {}", node.text);
-            }
+            print_node(&nodes, kind, node);
 
-            // Parent
-            if let Some(parent) = scan::find_parent(&nodes, node) {
-                println!("  parent: {} [{}]", parent.text, parent.id.short);
-            }
-
-            // Children: nodes that follow until next node at same or lower depth
-            let children = find_children(&nodes, node);
-            if !children.is_empty() {
-                println!("  children:");
-                for child in &children {
-                    let prefix = if child.depth.is_some() { "#" } else { " " };
-                    println!("    {prefix} {} [{}]", child.text, child.id.short);
-                }
-            }
-
-            // Notes
-            if !node.notes.is_empty() {
-                println!("  notes:");
-                for note in &node.notes {
-                    println!("    [[{note}]]");
-                }
-            }
-
-            // Bridge counterparts via CSVS
-            let csvs_dir = intent_dir.join("csvs");
             if csvs_dir.exists() {
                 print_bridges(&csvs_dir, kind, &node.id.short).await;
             }
 
-            return Ok(());
+            if !show_all {
+                return Ok(());
+            }
         }
     }
 
-    Err(format!("Node not found: {addr_str}"))
+    if found {
+        Ok(())
+    } else {
+        Err(format!("Node not found: {addr_str}"))
+    }
+}
+
+/// Print a single node's details.
+fn print_node(nodes: &[ScannedNode], kind: &TreeKind, node: &ScannedNode) {
+    println!("[{:?}] L{} [{}]", kind, node.line_number, node.id.short);
+
+    if let Some(d) = node.depth {
+        println!("  depth: {d}");
+    } else {
+        println!("  (action block)");
+    }
+
+    if node.text.is_empty() {
+        println!("  text: (empty)");
+    } else {
+        println!("  text: {}", node.text);
+    }
+
+    if let Some(parent) = scan::find_parent(nodes, node) {
+        println!("  parent: {} [{}]", parent.text, parent.id.short);
+    }
+
+    let children = find_children(nodes, node);
+    if !children.is_empty() {
+        println!("  children:");
+        for child in &children {
+            let prefix = if child.depth.is_some() { "#" } else { " " };
+            println!("    {prefix} {} [{}]", child.text, child.id.short);
+        }
+    }
+
+    if !node.notes.is_empty() {
+        println!("  notes:");
+        for note in &node.notes {
+            println!("    [[{note}]]");
+        }
+    }
 }
 
 /// Find direct children of a node in the scanned list.
