@@ -45,6 +45,18 @@ The bridges between trees (`source-structure.csv`, `structure-target.csv`) are m
 
 The system does not forbid orphans. It makes them visible. A translator may add a clarifying sentence that has no source counterpart — but the provenance graph shows this clearly as an interpretive addition rather than a translation. This visibility is the discipline: not a wall, but a mirror.
 
+### Authority and context
+
+CSVS is authority on relations, trees, nesting. Fountain is authority on text.
+
+Source is authority on intent, references and organization of the text. It can fail on meaning sometimes, and it always fails on style, but we cannot introduce new meaning or reorganize too much — if we do so, it is no longer a translation. We have to plausibly say the author of the target is still the author of the source. A source node exists in the context of a sequence — a node depends on the previous and following nodes.
+
+Structure is authority on meaning. Where source fails to express intent in meaning, structure shows the meaning that was obscured by an unfortunate choice of words. Structure is authority on flow of reasoning. Where source obfuscates the flow with tangents or double negatives, structure expresses it clearly. A structure node exists in the context of a tree — the superior structure it is nested in, both in the structure tree and in the source it corresponds to.
+
+Target is authority on style and terminology. Style is mostly determined by the tradition of the target language, and adequate terminology too. Rather than carrying mistakes of source or structure, target introduces style that feels natural and musical. A target node exists in the context of a sequence — each node depends on the previous and the following. But a target node also exists in the context of its counterparts in structure and source.
+
+One can imagine that when making a decision about a target node, the human looks at what precedes it in the target, at the corresponding structure node and its nesting up to the root of communicative intent, and at the source and what is around the source in the sequence.
+
 **Init produces a 1:1 scaffold.** When a source text is first parsed, the system generates a default 1:1 mapping between source and structure nodes — one structure node per source node, same shape. This scaffold is a convenience, not a law. The translator reshapes the DAG through split, annotate, and regrow as they discover the text's actual rhetorical structure.
 
 ### Leaves are the working unit

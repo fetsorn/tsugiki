@@ -87,6 +87,8 @@ Both inner nodes (headings) and leaf nodes receive annotations. A heading-level 
 
 **In AI-assisted mode**, this is where the AI is most useful. The AI reads the source text, asks the translator what it is doing, and the translator's answer becomes the annotation. The AI can probe: "is the list of government bodies important, or is the point that graduates are everywhere?" The translator answers, and the answer sharpens the annotation.
 
+After the first pass of annotate is complete, we do more passes to clarify and overwrite annotations.
+
 ### Phase 4: Regrow
 
 The translator walks the structure tree depth-first — siblings in order, descending into children before the next sibling — and for each structure leaf, writes target text that expresses that meaning in the target language. Each invocation of the regrow command creates exactly one target leaf node.

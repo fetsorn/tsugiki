@@ -20,6 +20,7 @@ pub async fn run(
     addr_str: &str,
     text: &str,
     note: Option<&str>,
+    overwrite: bool,
 ) -> Result<(), String> {
     let structure_path = intent_dir.join("prose/structure.fountain");
 
@@ -33,10 +34,13 @@ pub async fn run(
     let struct_nodes = scan::scan_all(&structure_path);
     if let Some(target) = resolve::resolve(&struct_nodes, &addr) {
         if !target.text.is_empty() {
-            return Err(format!(
-                "Node [{}] already has text: \"{}\"",
-                target.id.short, target.text
-            ));
+            if !overwrite {
+                return Err(format!(
+                    "Node [{}] already has text: \"{}\". Use --overwrite to replace.",
+                    target.id.short, target.text
+                ));
+            }
+            return annotate_replace(&structure_path, &struct_nodes, target.line_number, &target.id.short, text, note);
         }
         return annotate_existing(&structure_path, target.line_number, &target.id.short, text, note);
     }
@@ -71,10 +75,13 @@ pub async fn run(
     // Check if structure UUID already exists in fountain
     if let Some(existing) = scan::find_by_hex(&struct_nodes, &struct_short) {
         if !existing.text.is_empty() {
-            return Err(format!(
-                "Structure node [{struct_short}] already has text: \"{}\"",
-                existing.text
-            ));
+            if !overwrite {
+                return Err(format!(
+                    "Structure node [{struct_short}] already has text: \"{}\". Use --overwrite to replace.",
+                    existing.text
+                ));
+            }
+            return annotate_replace(&structure_path, &struct_nodes, existing.line_number, &struct_short, text, note);
         }
         return annotate_existing(&structure_path, existing.line_number, &struct_short, text, note);
     }
@@ -93,6 +100,94 @@ pub async fn run(
 
     // Insert after the parent heading's last child (or right after the heading if no children)
     annotate_new(&structure_path, &struct_nodes, parent_node.line_number, &struct_short, text, note)
+}
+
+/// Replace existing annotation text for a heading node.
+/// Finds the action block(s) belonging to this heading and replaces them with the new text.
+fn annotate_replace(
+    structure_path: &Path,
+    nodes: &[crate::types::ScannedNode],
+    target_line: usize,
+    target_id: &str,
+    text: &str,
+    note: Option<&str>,
+) -> Result<(), String> {
+    let content = fs::read_to_string(structure_path)
+        .map_err(|e| format!("Failed to read structure.fountain: {e}"))?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let temp_path = structure_path.with_extension("fountain.tmp");
+    let mut out = fs::File::create(&temp_path)
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+
+    // Find the node in scanned nodes to determine its extent
+    let node_idx = nodes.iter().position(|n| n.line_number == target_line)
+        .ok_or("Node not found in scanned nodes")?;
+
+    let node = &nodes[node_idx];
+
+    // Determine the range of lines to replace
+    let (skip_start, skip_end) = if node.depth.is_some() {
+        // It's a heading — find action blocks that belong to it (same ID or child actions)
+        // Skip lines from target_line+1 until the next heading at same or lesser depth,
+        // or the next scanned node that is a heading
+        let start = target_line; // 1-indexed, start skipping after this line
+        let mut end = target_line;
+        for n in &nodes[node_idx + 1..] {
+            if n.depth.is_some() {
+                break;
+            }
+            // Action block child — include in replacement range
+            end = n.line_number;
+        }
+        // Also skip blank lines and note lines between target_line and end
+        // Extend end to include trailing blank/note lines
+        let mut actual_end = end;
+        for i in end..lines.len() {
+            let line = lines[i].trim();
+            if line.is_empty() || line.starts_with("[[") {
+                actual_end = i + 1; // 1-indexed
+            } else {
+                break;
+            }
+        }
+        (start, actual_end)
+    } else {
+        // It's an action block — just replace this one line
+        (target_line - 1, target_line)
+    };
+
+    // Write: keep heading line, skip old action blocks, insert new text
+    for (i, line) in lines.iter().enumerate() {
+        let line_num = i + 1;
+
+        if line_num <= skip_start {
+            // Write up to and including the heading
+            writeln!(out, "{line}").map_err(|e| e.to_string())?;
+
+            if line_num == skip_start {
+                // Insert new annotation after heading
+                writeln!(out).map_err(|e| e.to_string())?;
+                write!(out, "{text} [[{target_id}]]").map_err(|e| e.to_string())?;
+
+                if let Some(n) = note {
+                    writeln!(out).map_err(|e| e.to_string())?;
+                    write!(out, "[[{n}]]").map_err(|e| e.to_string())?;
+                }
+
+                writeln!(out).map_err(|e| e.to_string())?;
+            }
+        } else if line_num > skip_end {
+            writeln!(out, "{line}").map_err(|e| e.to_string())?;
+        }
+        // else: skip old action block lines
+    }
+
+    fs::rename(&temp_path, structure_path)
+        .map_err(|e| format!("Failed to replace structure.fountain: {e}"))?;
+
+    println!("Replaced [{target_id}]: \"{text}\"");
+    Ok(())
 }
 
 /// Insert annotation as action block after an existing empty heading in structure.fountain.
@@ -315,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn annotate_empty_heading() {
         let dir = setup_intent("### [[abcd1234]]\n\n### already done [[efef5678]]\n");
-        run(dir.path(), "abcd1234", "this is what it does", None)
+        run(dir.path(), "abcd1234", "this is what it does", None, false)
             .await
             .unwrap();
 
@@ -332,6 +427,7 @@ mod tests {
             "abcd1234",
             "annotation text",
             Some("translator note here"),
+            false,
         )
         .await
         .unwrap();
@@ -344,7 +440,19 @@ mod tests {
     #[tokio::test]
     async fn refuses_nonempty() {
         let dir = setup_intent("### already has text [[abcd1234]]\n");
-        let result = run(dir.path(), "abcd1234", "new text", None).await;
+        let result = run(dir.path(), "abcd1234", "new text", None, false).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn overwrite_existing() {
+        let dir = setup_intent("### already has text [[abcd1234]]\n\nold annotation [[abcd1234]]\n");
+        run(dir.path(), "abcd1234", "new annotation", None, true)
+            .await
+            .unwrap();
+
+        let result = fs::read_to_string(dir.path().join("prose/structure.fountain")).unwrap();
+        assert!(result.contains("new annotation [[abcd1234]]"));
+        assert!(!result.contains("old annotation"));
     }
 }

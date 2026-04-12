@@ -5,14 +5,9 @@ use csvs::{Dataset, Entry};
 
 use crate::scan;
 
-/// Find the next source node that needs a structure annotation.
-///
-/// Algorithm:
-/// 1. Walk source nodes in document order (source.fountain).
-/// 2. For each, look up its structure UUID via source-structure.csv.
-/// 3. Collect all UUIDs present in structure.fountain.
-/// 4. Return the first source node whose structure UUID is absent from fountain.
-pub async fn run(intent_dir: &Path) -> Result<(), String> {
+/// Find the next source node that needs a structure annotation and return its source short ID.
+/// Returns Ok(None) if all nodes are annotated.
+pub async fn find_next(intent_dir: &Path) -> Result<Option<String>, String> {
     let source_path = intent_dir.join("prose/source.fountain");
     let structure_path = intent_dir.join("prose/structure.fountain");
     let csvs_dir = intent_dir.join("csvs");
@@ -21,7 +16,6 @@ pub async fn run(intent_dir: &Path) -> Result<(), String> {
         return Err("No source.fountain found. Run init first.".into());
     }
 
-    // Collect all UUIDs present in structure.fountain (just the short hex ids)
     let structure_ids: HashSet<String> = if structure_path.exists() {
         scan::scan_all(&structure_path)
             .into_iter()
@@ -31,26 +25,59 @@ pub async fn run(intent_dir: &Path) -> Result<(), String> {
         HashSet::new()
     };
 
-    // Load source-structure mappings from CSVS
     let bridge = load_source_structure(&csvs_dir).await?;
-
-    // Walk source nodes in document order
     let source_nodes = scan::scan_all(&source_path);
 
     for source_node in &source_nodes {
-        // Skip section headers with no text — they're grouping markers,
-        // annotated via their children's structure headings
         if source_node.text.is_empty() {
             continue;
         }
 
-        // Look up the structure UUID for this source node
         let struct_id = match bridge.get(&source_node.id.short) {
             Some(id) => id,
-            None => continue, // no mapping — skip
+            None => continue,
         };
 
-        // Check if this structure UUID is already in structure.fountain
+        if !structure_ids.contains(struct_id.as_str()) {
+            return Ok(Some(source_node.id.short.clone()));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Print the next unannotated node's details.
+pub async fn run(intent_dir: &Path) -> Result<(), String> {
+    let source_path = intent_dir.join("prose/source.fountain");
+    let structure_path = intent_dir.join("prose/structure.fountain");
+    let csvs_dir = intent_dir.join("csvs");
+
+    if !source_path.exists() {
+        return Err("No source.fountain found. Run init first.".into());
+    }
+
+    let structure_ids: HashSet<String> = if structure_path.exists() {
+        scan::scan_all(&structure_path)
+            .into_iter()
+            .map(|n| n.id.short)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    let bridge = load_source_structure(&csvs_dir).await?;
+    let source_nodes = scan::scan_all(&source_path);
+
+    for source_node in &source_nodes {
+        if source_node.text.is_empty() {
+            continue;
+        }
+
+        let struct_id = match bridge.get(&source_node.id.short) {
+            Some(id) => id,
+            None => continue,
+        };
+
         if !structure_ids.contains(struct_id.as_str()) {
             println!("annotate phase");
             println!(
@@ -60,7 +87,6 @@ pub async fn run(intent_dir: &Path) -> Result<(), String> {
             println!("  text: {}", source_node.text);
             println!("  structure: [{struct_id}] (not yet in fountain)");
 
-            // Show parent context
             if let Some(parent) = scan::find_parent(&source_nodes, source_node) {
                 println!("  parent: {} [{}]", parent.text, parent.id.short);
             }
@@ -74,7 +100,6 @@ pub async fn run(intent_dir: &Path) -> Result<(), String> {
 }
 
 /// Load source→structure short-id mappings from source-structure.csv via CSVS.
-/// Returns a map from source short id to structure short id.
 async fn load_source_structure(
     csvs_dir: &Path,
 ) -> Result<std::collections::HashMap<String, String>, String> {
