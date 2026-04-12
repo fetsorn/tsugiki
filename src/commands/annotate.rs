@@ -41,25 +41,32 @@ pub async fn run(
         return annotate_existing(&structure_path, target.line_number, &target.id.short, text, note);
     }
 
-    // Not in structure — try source.fountain
+    let csvs_dir = intent_dir.join("csvs");
+
+    // Not in structure fountain — try source.fountain
     let source_path = intent_dir.join("prose/source.fountain");
-    if !source_path.exists() {
+    let struct_short;
+
+    if source_path.exists() {
+        let source_nodes = scan::scan_all(&source_path);
+        if let Some(source_node) = resolve::resolve(&source_nodes, &addr) {
+            // Found in source — look up structure UUID via source-structure.csv
+            struct_short = lookup_structure_for_source(&csvs_dir, &source_node.id.short)
+                .await
+                .ok_or_else(|| {
+                    format!("No structure mapping found for source [{}] in source-structure.csv", source_node.id.short)
+                })?;
+        } else if matches!(addr, Addr::Hex(_)) {
+            // Not in source either — treat the hex as a structure UUID from CSVS
+            struct_short = addr_str.to_string();
+        } else {
+            return Err(format!("Node not found: {addr_str}"));
+        }
+    } else if matches!(addr, Addr::Hex(_)) {
+        struct_short = addr_str.to_string();
+    } else {
         return Err(format!("Node not found: {addr_str}"));
     }
-
-    let source_nodes = scan::scan_all(&source_path);
-    let source_node = resolve::resolve(&source_nodes, &addr)
-        .ok_or_else(|| format!("Node not found: {addr_str}"))?;
-
-    let source_short = &source_node.id.short;
-
-    // Look up structure UUID via source-structure.csv
-    let csvs_dir = intent_dir.join("csvs");
-    let struct_short = lookup_structure_for_source(&csvs_dir, source_short)
-        .await
-        .ok_or_else(|| {
-            format!("No structure mapping found for source [{source_short}] in source-structure.csv")
-        })?;
 
     // Check if structure UUID already exists in fountain
     if let Some(existing) = scan::find_by_hex(&struct_nodes, &struct_short) {
@@ -107,8 +114,9 @@ fn annotate_existing(
     for (i, line) in lines.iter().enumerate() {
         let line_num = i + 1;
 
+        writeln!(out, "{line}").map_err(|e| e.to_string())?;
+
         if line_num == target_line {
-            writeln!(out, "{line}").map_err(|e| e.to_string())?;
             writeln!(out).map_err(|e| e.to_string())?;
             write!(out, "{text} [[{target_id}]]").map_err(|e| e.to_string())?;
 
@@ -118,8 +126,6 @@ fn annotate_existing(
             }
 
             writeln!(out).map_err(|e| e.to_string())?;
-        } else {
-            writeln!(out, "{line}").map_err(|e| e.to_string())?;
         }
     }
 
@@ -165,12 +171,14 @@ fn annotate_new(
         }
     }
 
-    // Skip past any note lines or blank lines after the last child node
-    let mut actual_insert = insert_after_line;
+    // Skip past any [[note]] lines after the last child node (but not blank lines).
+    // insert_after_line is 1-indexed.
+    let mut actual_insert = insert_after_line; // 1-indexed, line after which to insert
     for i in insert_after_line..lines.len() {
+        // i is 0-indexed index for the line AFTER insert_after_line
         let line = lines[i].trim();
-        if line.is_empty() || line.starts_with("[[") {
-            actual_insert = i + 1; // 0-indexed line index
+        if line.starts_with("[[") {
+            actual_insert = i + 1; // 1-indexed
         } else {
             break;
         }
@@ -181,10 +189,12 @@ fn annotate_new(
         .map_err(|e| format!("Failed to create temp file: {e}"))?;
 
     for (i, line) in lines.iter().enumerate() {
+        let line_num = i + 1; // 1-indexed
+
         writeln!(out, "{line}").map_err(|e| e.to_string())?;
 
-        if i + 1 == actual_insert {
-            // Insert blank line + action block
+        if line_num == actual_insert {
+            // Insert action block after this line
             writeln!(out).map_err(|e| e.to_string())?;
             write!(out, "{text} [[{struct_id}]]").map_err(|e| e.to_string())?;
 
@@ -197,8 +207,8 @@ fn annotate_new(
         }
     }
 
-    // If insert point is at the very end
-    if actual_insert >= lines.len() {
+    // If insert point is past the end
+    if actual_insert > lines.len() {
         writeln!(out).map_err(|e| e.to_string())?;
         write!(out, "{text} [[{struct_id}]]").map_err(|e| e.to_string())?;
 
