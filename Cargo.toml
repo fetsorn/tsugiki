@@ -5,10 +5,9 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-csvs = { path = "../csvs-rs" }
-regex = "1"
-tokio = { version = "1", features = ["full"] }
-uuid = { version = "1", features = ["v4"] }
+markdown = "1.0.0"
+unicode-segmentation = "1.13.2"
+uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
 tempfile = "3"

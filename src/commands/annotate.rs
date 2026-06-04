@@ -1,397 +1,77 @@
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use csvs::{Dataset, Entry};
+use crate::store;
 
-use crate::resolve;
-use crate::scan;
-use crate::types::Addr;
-
-/// Write annotation text to a structure node.
+/// Write annotation text to a structure node's prose blob.
 ///
-/// Two modes:
-/// 1. Address resolves in structure.fountain → insert action block after the heading (existing).
-/// 2. Address resolves in source.fountain → look up structure UUID via CSVS,
-///    find parent structure heading via structure-child.csv, insert new action block
-///    under that parent in structure.fountain.
-pub async fn run(
+/// If note is provided, it's appended as a [[note]] line.
+/// If overwrite is false, refuses to write over existing prose.
+pub fn run(
     intent_dir: &Path,
     addr_str: &str,
     text: &str,
     note: Option<&str>,
     overwrite: bool,
 ) -> Result<(), String> {
-    let structure_path = intent_dir.join("prose/structure.fountain");
-
-    if !structure_path.exists() {
-        return Err("No structure.fountain found.".into());
-    }
-
-    let addr = Addr::parse(addr_str);
-
-    // Try structure.fountain first
-    let struct_nodes = scan::scan_all(&structure_path);
-    if let Some(target) = resolve::resolve(&struct_nodes, &addr) {
-        if !target.text.is_empty() {
-            if !overwrite {
-                return Err(format!(
-                    "Node [{}] already has text: \"{}\". Use --overwrite to replace.",
-                    target.id.short, target.text
-                ));
-            }
-            return annotate_replace(&structure_path, &struct_nodes, target.line_number, &target.id.short, text, note);
-        }
-        return annotate_existing(&structure_path, target.line_number, &target.id.short, text, note);
-    }
-
     let csvs_dir = intent_dir.join("csvs");
+    let prose_dir = csvs_dir.join("prose");
 
-    // Not in structure fountain — try source.fountain
-    let source_path = intent_dir.join("prose/source.fountain");
-    let struct_short;
+    // Resolve address to full UUID
+    let uuid = store::resolve_uuid(&csvs_dir, addr_str)
+        .ok_or_else(|| format!("Node not found: {addr_str}"))?;
 
-    if source_path.exists() {
-        let source_nodes = scan::scan_all(&source_path);
-        if let Some(source_node) = resolve::resolve(&source_nodes, &addr) {
-            // Found in source — look up structure UUID via source-structure.csv
-            struct_short = lookup_structure_for_source(&csvs_dir, &source_node.id.short)
-                .await
-                .ok_or_else(|| {
-                    format!("No structure mapping found for source [{}] in source-structure.csv", source_node.id.short)
-                })?;
-        } else if matches!(addr, Addr::Hex(_)) {
-            // Not in source either — treat the hex as a structure UUID from CSVS
-            struct_short = addr_str.to_string();
-        } else {
-            return Err(format!("Node not found: {addr_str}"));
+    // Verify this UUID is in the structure tree
+    let sc_path = csvs_dir.join("structure-child.csv");
+    if sc_path.exists() {
+        let (forward, reverse) = store::load_edges(&sc_path)?;
+        let in_structure = forward.contains_key(&uuid) || reverse.contains_key(&uuid);
+        if !in_structure {
+            return Err(format!("[{}] is not in the structure tree", store::short_id(&uuid)));
         }
-    } else if matches!(addr, Addr::Hex(_)) {
-        struct_short = addr_str.to_string();
+    }
+
+    let existing = store::read_prose(&csvs_dir, &uuid);
+
+    if !existing.is_empty() && !overwrite {
+        return Err(format!(
+            "Node [{}] already has text: \"{}\". Use --overwrite to replace.",
+            store::short_id(&uuid),
+            first_line(&existing, 60)
+        ));
+    }
+
+    // Build prose content
+    let mut content = text.to_string();
+    if let Some(n) = note {
+        content.push('\n');
+        content.push_str(&format!("[[{n}]]"));
+    }
+
+    fs::create_dir_all(&prose_dir)
+        .map_err(|e| format!("Failed to create prose dir: {e}"))?;
+
+    fs::write(prose_dir.join(&uuid), &content)
+        .map_err(|e| format!("Failed to write prose blob: {e}"))?;
+
+    let short = store::short_id(&uuid);
+    if existing.is_empty() {
+        println!("annotated [{short}]: \"{text}\"");
     } else {
-        return Err(format!("Node not found: {addr_str}"));
+        println!("replaced [{short}]: \"{text}\"");
     }
 
-    // Check if structure UUID already exists in fountain
-    if let Some(existing) = scan::find_by_hex(&struct_nodes, &struct_short) {
-        if !existing.text.is_empty() {
-            if !overwrite {
-                return Err(format!(
-                    "Structure node [{struct_short}] already has text: \"{}\". Use --overwrite to replace.",
-                    existing.text
-                ));
-            }
-            return annotate_replace(&structure_path, &struct_nodes, existing.line_number, &struct_short, text, note);
-        }
-        return annotate_existing(&structure_path, existing.line_number, &struct_short, text, note);
-    }
-
-    // Structure UUID not in fountain yet — find parent via structure-child.csv
-    let parent_short = lookup_parent_structure(&csvs_dir, &struct_short)
-        .await
-        .ok_or_else(|| {
-            format!("No parent found for structure [{struct_short}] in structure-child.csv")
-        })?;
-
-    // Find the parent heading in structure.fountain
-    let parent_node = scan::find_by_hex(&struct_nodes, &parent_short).ok_or_else(|| {
-        format!("Parent structure [{parent_short}] not found in structure.fountain")
-    })?;
-
-    // Insert after the parent heading's last child (or right after the heading if no children)
-    annotate_new(&structure_path, &struct_nodes, parent_node.line_number, &struct_short, text, note)
+    Ok(())
 }
 
-/// Replace existing annotation text for a heading node.
-/// Finds the action block(s) belonging to this heading and replaces them with the new text.
-fn annotate_replace(
-    structure_path: &Path,
-    nodes: &[crate::types::ScannedNode],
-    target_line: usize,
-    target_id: &str,
-    text: &str,
-    note: Option<&str>,
-) -> Result<(), String> {
-    let content = fs::read_to_string(structure_path)
-        .map_err(|e| format!("Failed to read structure.fountain: {e}"))?;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let temp_path = structure_path.with_extension("fountain.tmp");
-    let mut out = fs::File::create(&temp_path)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
-
-    // Find the node in scanned nodes to determine its extent
-    let node_idx = nodes.iter().position(|n| n.line_number == target_line)
-        .ok_or("Node not found in scanned nodes")?;
-
-    let node = &nodes[node_idx];
-
-    // Determine the range of lines to replace
-    let (skip_start, skip_end) = if node.depth.is_some() {
-        // It's a heading — find action blocks that belong to it (same ID or child actions)
-        // Skip lines from target_line+1 until the next heading at same or lesser depth,
-        // or the next scanned node that is a heading
-        let start = target_line; // 1-indexed, start skipping after this line
-        let mut end = target_line;
-        for n in &nodes[node_idx + 1..] {
-            if n.depth.is_some() {
-                break;
-            }
-            // Action block child — include in replacement range
-            end = n.line_number;
-        }
-        // Also skip blank lines and note lines between target_line and end
-        // Extend end to include trailing blank/note lines
-        let mut actual_end = end;
-        for i in end..lines.len() {
-            let line = lines[i].trim();
-            if line.is_empty() || line.starts_with("[[") {
-                actual_end = i + 1; // 1-indexed
-            } else {
-                break;
-            }
-        }
-        (start, actual_end)
+fn first_line(s: &str, max_len: usize) -> String {
+    let line = s.lines().next().unwrap_or(s);
+    if line.len() <= max_len {
+        line.to_string()
     } else {
-        // It's an action block — just replace this one line
-        (target_line - 1, target_line)
-    };
-
-    // Write: keep heading line, skip old action blocks, insert new text
-    for (i, line) in lines.iter().enumerate() {
-        let line_num = i + 1;
-
-        if line_num <= skip_start {
-            // Write up to and including the heading
-            writeln!(out, "{line}").map_err(|e| e.to_string())?;
-
-            if line_num == skip_start {
-                // Insert new annotation after heading
-                writeln!(out).map_err(|e| e.to_string())?;
-                write!(out, "{text} [[{target_id}]]").map_err(|e| e.to_string())?;
-
-                if let Some(n) = note {
-                    writeln!(out).map_err(|e| e.to_string())?;
-                    write!(out, "[[{n}]]").map_err(|e| e.to_string())?;
-                }
-
-                writeln!(out).map_err(|e| e.to_string())?;
-            }
-        } else if line_num > skip_end {
-            writeln!(out, "{line}").map_err(|e| e.to_string())?;
-        }
-        // else: skip old action block lines
+        let end = line.char_indices().nth(max_len).map(|(i, _)| i).unwrap_or(line.len());
+        format!("{}...", &line[..end])
     }
-
-    fs::rename(&temp_path, structure_path)
-        .map_err(|e| format!("Failed to replace structure.fountain: {e}"))?;
-
-    println!("Replaced [{target_id}]: \"{text}\"");
-    Ok(())
-}
-
-/// Insert annotation as action block after an existing empty heading in structure.fountain.
-fn annotate_existing(
-    structure_path: &Path,
-    target_line: usize,
-    target_id: &str,
-    text: &str,
-    note: Option<&str>,
-) -> Result<(), String> {
-    let content = fs::read_to_string(structure_path)
-        .map_err(|e| format!("Failed to read structure.fountain: {e}"))?;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let temp_path = structure_path.with_extension("fountain.tmp");
-    let mut out = fs::File::create(&temp_path)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
-
-    for (i, line) in lines.iter().enumerate() {
-        let line_num = i + 1;
-
-        writeln!(out, "{line}").map_err(|e| e.to_string())?;
-
-        if line_num == target_line {
-            writeln!(out).map_err(|e| e.to_string())?;
-            write!(out, "{text} [[{target_id}]]").map_err(|e| e.to_string())?;
-
-            if let Some(n) = note {
-                writeln!(out).map_err(|e| e.to_string())?;
-                write!(out, "[[{n}]]").map_err(|e| e.to_string())?;
-            }
-
-            writeln!(out).map_err(|e| e.to_string())?;
-        }
-    }
-
-    fs::rename(&temp_path, structure_path)
-        .map_err(|e| format!("Failed to replace structure.fountain: {e}"))?;
-
-    println!("Annotated [{target_id}] (existing heading): \"{text}\"");
-    Ok(())
-}
-
-/// Insert a brand-new action block under a parent heading in structure.fountain.
-/// The new block goes after the parent's last existing child.
-fn annotate_new(
-    structure_path: &Path,
-    nodes: &[crate::types::ScannedNode],
-    parent_line: usize,
-    struct_id: &str,
-    text: &str,
-    note: Option<&str>,
-) -> Result<(), String> {
-    let content = fs::read_to_string(structure_path)
-        .map_err(|e| format!("Failed to read structure.fountain: {e}"))?;
-
-    let lines: Vec<&str> = content.lines().collect();
-
-    // Find where the parent's section ends — the next node at same or lower depth
-    let parent_idx = nodes.iter().position(|n| n.line_number == parent_line)
-        .ok_or("Parent node not found in scanned nodes")?;
-    let parent_depth = nodes[parent_idx].depth
-        .ok_or("Parent must be a heading")?;
-
-    // Find the line after the last child of this parent (or after parent itself)
-    let mut insert_after_line = parent_line;
-    for node in &nodes[parent_idx + 1..] {
-        match node.depth {
-            Some(d) if d <= parent_depth => break,
-            _ => {
-                // This node is a child/grandchild — track the last line in this section
-                insert_after_line = node.line_number;
-                // Also account for note lines that follow this node
-                // (they're on subsequent lines but not separate nodes)
-            }
-        }
-    }
-
-    // Skip past any [[note]] lines after the last child node (but not blank lines).
-    // insert_after_line is 1-indexed.
-    let mut actual_insert = insert_after_line; // 1-indexed, line after which to insert
-    for i in insert_after_line..lines.len() {
-        // i is 0-indexed index for the line AFTER insert_after_line
-        let line = lines[i].trim();
-        if line.starts_with("[[") {
-            actual_insert = i + 1; // 1-indexed
-        } else {
-            break;
-        }
-    }
-
-    let temp_path = structure_path.with_extension("fountain.tmp");
-    let mut out = fs::File::create(&temp_path)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
-
-    for (i, line) in lines.iter().enumerate() {
-        let line_num = i + 1; // 1-indexed
-
-        writeln!(out, "{line}").map_err(|e| e.to_string())?;
-
-        if line_num == actual_insert {
-            // Insert action block after this line
-            writeln!(out).map_err(|e| e.to_string())?;
-            write!(out, "{text} [[{struct_id}]]").map_err(|e| e.to_string())?;
-
-            if let Some(n) = note {
-                writeln!(out).map_err(|e| e.to_string())?;
-                write!(out, "[[{n}]]").map_err(|e| e.to_string())?;
-            }
-
-            writeln!(out).map_err(|e| e.to_string())?;
-        }
-    }
-
-    // If insert point is past the end
-    if actual_insert > lines.len() {
-        writeln!(out).map_err(|e| e.to_string())?;
-        write!(out, "{text} [[{struct_id}]]").map_err(|e| e.to_string())?;
-
-        if let Some(n) = note {
-            writeln!(out).map_err(|e| e.to_string())?;
-            write!(out, "[[{n}]]").map_err(|e| e.to_string())?;
-        }
-
-        writeln!(out).map_err(|e| e.to_string())?;
-    }
-
-    fs::rename(&temp_path, structure_path)
-        .map_err(|e| format!("Failed to replace structure.fountain: {e}"))?;
-
-    println!("Annotated [{struct_id}] (new block under parent): \"{text}\"");
-    Ok(())
-}
-
-/// Look up the structure short ID for a source short ID via source-structure.csv.
-async fn lookup_structure_for_source(csvs_dir: &Path, source_short: &str) -> Option<String> {
-    let dir = PathBuf::from(csvs_dir);
-    let dataset = Dataset::open(&dir).await.ok()?;
-
-    let query = Entry {
-        base: "source".to_string(),
-        base_value: None,
-        leader_value: None,
-        leaves: std::collections::HashMap::from([(
-            "structure".to_string(),
-            vec![Entry::new("structure")],
-        )]),
-    };
-
-    let results: Vec<Entry> = dataset.select_record(vec![query]).await.ok()?;
-
-    for entry in &results {
-        if let Some(src_full) = &entry.base_value {
-            let short = src_full.split('-').next().unwrap_or(src_full);
-            if short == source_short {
-                if let Some(leaves) = entry.leaves.get("structure") {
-                    for l in leaves {
-                        if let Some(struct_full) = &l.base_value {
-                            let struct_short = struct_full.split('-').next().unwrap_or(struct_full);
-                            return Some(struct_short.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Look up the parent structure short ID for a child structure short ID via structure-child.csv.
-async fn lookup_parent_structure(csvs_dir: &Path, child_short: &str) -> Option<String> {
-    let dir = PathBuf::from(csvs_dir);
-    let dataset = Dataset::open(&dir).await.ok()?;
-
-    let query = Entry {
-        base: "structure".to_string(),
-        base_value: None,
-        leader_value: None,
-        leaves: std::collections::HashMap::from([(
-            "child".to_string(),
-            vec![Entry::new("child")],
-        )]),
-    };
-
-    let results: Vec<Entry> = dataset.select_record(vec![query]).await.ok()?;
-
-    for entry in &results {
-        if let Some(leaves) = entry.leaves.get("child") {
-            for l in leaves {
-                if let Some(child_full) = &l.base_value {
-                    let short = child_full.split('-').next().unwrap_or(child_full);
-                    if short == child_short {
-                        if let Some(parent_full) = &entry.base_value {
-                            let parent_short = parent_full.split('-').next().unwrap_or(parent_full);
-                            return Some(parent_short.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -399,60 +79,64 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn setup_intent(structure_content: &str) -> TempDir {
+    fn setup_intent() -> TempDir {
         let dir = TempDir::new().unwrap();
-        let prose_dir = dir.path().join("prose");
+        let csvs_dir = dir.path().join("csvs");
+        let prose_dir = csvs_dir.join("prose");
         fs::create_dir_all(&prose_dir).unwrap();
-        fs::write(prose_dir.join("structure.fountain"), structure_content).unwrap();
+
+        // Minimal structure tree: root → one child
+        fs::write(
+            csvs_dir.join("structure-child.csv"),
+            "aaaa1111-0000-0000-0000-000000000000,bbbb2222-0000-0000-0000-000000000000\n",
+        ).unwrap();
+
+        fs::write(csvs_dir.join(".csvs.csv"), "csvs,0.0.4\nuuid,test\n").unwrap();
+        fs::write(csvs_dir.join("_-_.csv"), "structure,child\n").unwrap();
+
         dir
     }
 
-    #[tokio::test]
-    async fn annotate_empty_heading() {
-        let dir = setup_intent("### [[abcd1234]]\n\n### already done [[efef5678]]\n");
-        run(dir.path(), "abcd1234", "this is what it does", None, false)
-            .await
-            .unwrap();
+    #[test]
+    fn annotate_empty_node() {
+        let dir = setup_intent();
+        run(dir.path(), "bbbb2222", "this is what it does", None, false).unwrap();
 
-        let result = fs::read_to_string(dir.path().join("prose/structure.fountain")).unwrap();
-        assert!(result.contains("this is what it does [[abcd1234]]"));
-        assert!(result.contains("### [[abcd1234]]"));
+        let prose = fs::read_to_string(
+            dir.path().join("csvs/prose/bbbb2222-0000-0000-0000-000000000000")
+        ).unwrap();
+        assert_eq!(prose, "this is what it does");
     }
 
-    #[tokio::test]
-    async fn annotate_with_note() {
-        let dir = setup_intent("### [[abcd1234]]\n");
-        run(
-            dir.path(),
-            "abcd1234",
-            "annotation text",
-            Some("translator note here"),
-            false,
-        )
-        .await
-        .unwrap();
+    #[test]
+    fn annotate_with_note() {
+        let dir = setup_intent();
+        run(dir.path(), "bbbb2222", "annotation", Some("a translator note"), false).unwrap();
 
-        let result = fs::read_to_string(dir.path().join("prose/structure.fountain")).unwrap();
-        assert!(result.contains("annotation text [[abcd1234]]"));
-        assert!(result.contains("[[translator note here]]"));
+        let prose = fs::read_to_string(
+            dir.path().join("csvs/prose/bbbb2222-0000-0000-0000-000000000000")
+        ).unwrap();
+        assert!(prose.contains("annotation"));
+        assert!(prose.contains("[[a translator note]]"));
     }
 
-    #[tokio::test]
-    async fn refuses_nonempty() {
-        let dir = setup_intent("### already has text [[abcd1234]]\n");
-        let result = run(dir.path(), "abcd1234", "new text", None, false).await;
+    #[test]
+    fn refuses_nonempty() {
+        let dir = setup_intent();
+        run(dir.path(), "bbbb2222", "first", None, false).unwrap();
+        let result = run(dir.path(), "bbbb2222", "second", None, false);
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn overwrite_existing() {
-        let dir = setup_intent("### already has text [[abcd1234]]\n\nold annotation [[abcd1234]]\n");
-        run(dir.path(), "abcd1234", "new annotation", None, true)
-            .await
-            .unwrap();
+    #[test]
+    fn overwrite_existing() {
+        let dir = setup_intent();
+        run(dir.path(), "bbbb2222", "first", None, false).unwrap();
+        run(dir.path(), "bbbb2222", "second", None, true).unwrap();
 
-        let result = fs::read_to_string(dir.path().join("prose/structure.fountain")).unwrap();
-        assert!(result.contains("new annotation [[abcd1234]]"));
-        assert!(!result.contains("old annotation"));
+        let prose = fs::read_to_string(
+            dir.path().join("csvs/prose/bbbb2222-0000-0000-0000-000000000000")
+        ).unwrap();
+        assert_eq!(prose, "second");
     }
 }

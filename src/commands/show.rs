@@ -1,58 +1,112 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use csvs::{Dataset, Entry};
+use crate::store;
 
-use crate::resolve;
-use crate::scan;
-use crate::types::{Addr, ScannedNode, TreeKind};
-
-/// Display a node with context: text, parent, children, bridges, sequence neighbors.
+/// Display a node with context: text, parent, children, bridges.
 ///
-/// tree_filter: if Some, only show that tree. If None, show all matching trees.
+/// tree_filter: if Some, only show in that tree. If None, show in all trees.
 /// child_limit: max children to display (0 = unlimited).
-/// depth: how many levels of children to show (0 = node only, 1 = direct children, etc.)
-pub async fn run(
+/// max_depth: how many levels of children to show.
+pub fn run(
     intent_dir: &Path,
     addr_str: &str,
-    tree_filter: Option<&TreeKind>,
+    tree_filter: Option<&str>,
     child_limit: usize,
-    depth: usize,
+    max_depth: usize,
 ) -> Result<(), String> {
-    let addr = Addr::parse(addr_str);
+    let csvs_dir = intent_dir.join("csvs");
 
-    let trees = match tree_filter {
-        Some(kind) => vec![kind.clone()],
-        None => vec![TreeKind::Source, TreeKind::Structure, TreeKind::Target],
+    // Resolve address to full UUID
+    let uuid = store::resolve_uuid(&csvs_dir, addr_str)
+        .ok_or_else(|| format!("Node not found: {addr_str}"))?;
+
+    let trees: Vec<(&str, &str)> = match tree_filter {
+        Some("source") => vec![("source", "source-child.csv")],
+        Some("structure") => vec![("structure", "structure-child.csv")],
+        Some("target") => vec![("target", "target-child.csv")],
+        Some(t) => return Err(format!("Unknown tree: {t}")),
+        None => vec![
+            ("source", "source-child.csv"),
+            ("structure", "structure-child.csv"),
+            ("target", "target-child.csv"),
+        ],
     };
 
-    let show_all = tree_filter.is_none() && matches!(addr, Addr::Line(_));
-    let csvs_dir = intent_dir.join("csvs");
     let mut found = false;
 
-    for kind in &trees {
-        let path = intent_dir.join("prose").join(kind.fountain_filename());
-        if !path.exists() {
+    for (tree_name, tablet_name) in &trees {
+        let tablet_path = csvs_dir.join(tablet_name);
+        if !tablet_path.exists() {
             continue;
         }
 
-        let nodes = scan::scan_all(&path);
-        if let Some(node) = resolve::resolve(&nodes, &addr) {
-            if found {
-                println!();
+        let (forward, reverse) = store::load_edges(&tablet_path)?;
+
+        // Check if this UUID appears in this tree
+        let in_tree = forward.contains_key(&uuid) || reverse.contains_key(&uuid);
+        if !in_tree {
+            continue;
+        }
+
+        if found {
+            println!();
+        }
+        found = true;
+
+        let short = store::short_id(&uuid);
+        let prose = store::read_prose(&csvs_dir, &uuid);
+        let has_children = forward.get(&uuid).map(|k| !k.is_empty()).unwrap_or(false);
+        let has_parent = reverse.contains_key(&uuid);
+        let kind = node_kind(has_parent, has_children, &prose);
+
+        println!("[{tree_name}] [{short}] {kind}");
+
+        if prose.is_empty() {
+            println!("  text: (empty)");
+        } else {
+            let display = truncate(&prose, 120);
+            println!("  text: {display}");
+        }
+
+        // Parent
+        if let Some(parent_uuid) = reverse.get(&uuid) {
+            let parent_short = store::short_id(parent_uuid);
+            let parent_prose = store::read_prose(&csvs_dir, parent_uuid);
+            let parent_text = if parent_prose.is_empty() {
+                "(empty)".to_string()
+            } else {
+                truncate(&parent_prose, 60)
+            };
+            println!("  parent: [{parent_short}] {parent_text}");
+        }
+
+        // Children
+        if let Some(kids) = forward.get(&uuid) {
+            if !kids.is_empty() {
+                let total = kids.len();
+                let show_count = if child_limit == 0 { total } else { child_limit.min(total) };
+                println!("  children ({total}):");
+                print_children(&csvs_dir, &forward, &kids[..show_count], max_depth, 1);
+                if show_count < total {
+                    println!("    ... and {} more", total - show_count);
+                }
             }
-            found = true;
+        }
 
-            print_node(&nodes, kind, node, child_limit, depth, 0);
+        // Bridges
+        print_bridges(&csvs_dir, tree_name, &uuid)?;
 
-            if csvs_dir.exists() {
-                print_bridges(&csvs_dir, kind, &node.id.short).await;
-            }
-
-            // Prev/next
-            print_neighbors(&nodes, kind, node);
-
-            if !show_all {
-                return Ok(());
+        // Siblings (prev/next in parent's child list)
+        if let Some(parent_uuid) = reverse.get(&uuid) {
+            if let Some(siblings) = forward.get(parent_uuid) {
+                if let Some(pos) = siblings.iter().position(|s| s == &uuid) {
+                    if pos > 0 {
+                        println!("  prev: [{}]", store::short_id(&siblings[pos - 1]));
+                    }
+                    if pos + 1 < siblings.len() {
+                        println!("  next: [{}]", store::short_id(&siblings[pos + 1]));
+                    }
+                }
             }
         }
     }
@@ -60,313 +114,127 @@ pub async fn run(
     if found {
         Ok(())
     } else {
-        Err(format!("Node not found: {addr_str}"))
+        Err(format!("Node not found in any tree: {addr_str}"))
     }
 }
 
-/// Print a single node's details.
-fn print_node(
-    nodes: &[ScannedNode],
-    kind: &TreeKind,
-    node: &ScannedNode,
-    child_limit: usize,
+/// Print children recursively up to max_depth.
+fn print_children(
+    csvs_dir: &Path,
+    forward: &std::collections::HashMap<String, Vec<String>>,
+    kids: &[String],
     max_depth: usize,
     current_depth: usize,
 ) {
-    let indent = "  ".repeat(current_depth);
-
-    if current_depth == 0 {
-        println!("[{:?}] L{} [{}]", kind, node.line_number, node.id.short);
-
-        if let Some(d) = node.depth {
-            println!("  depth: {d}");
+    let indent = "  ".repeat(current_depth + 1);
+    for kid in kids {
+        let short = store::short_id(kid);
+        let prose = store::read_prose(csvs_dir, kid);
+        let text = if prose.is_empty() {
+            "(empty)".to_string()
         } else {
-            println!("  (action block)");
-        }
+            truncate(&prose, 72)
+        };
+        let has_kids = forward.get(kid).map(|k| !k.is_empty()).unwrap_or(false);
+        let kind = node_kind(true, has_kids, &prose);
+        println!("{indent}[{short}] {kind} {text}");
 
-        if node.text.is_empty() {
-            println!("  text: (empty)");
-        } else {
-            println!("  text: {}", node.text);
-        }
-
-        if let Some(parent) = scan::find_parent(nodes, node) {
-            println!("  parent: [{}]", parent.id.short);
-        }
-
-        if !node.notes.is_empty() {
-            println!("  notes:");
-            for note in &node.notes {
-                println!("    [[{note}]]");
-            }
-        }
-    } else {
-        // Nested child display
-        let prefix = if node.depth.is_some() { "#" } else { " " };
-        let text = truncate(&node.text, 72);
-        println!("{indent}{prefix} [{} L{}] {text}", node.id.short, node.line_number);
-    }
-
-    // Show children if within depth limit
-    if current_depth < max_depth {
-        let children = find_children(nodes, kind, node);
-        if !children.is_empty() {
-            let total = children.len();
-            let show_count = if child_limit == 0 { total } else { child_limit.min(total) };
-
-            if current_depth == 0 {
-                println!("  children ({total}):");
-            }
-
-            let child_indent = if current_depth == 0 { "    " } else { &format!("{}  ", indent) };
-            for child in &children[..show_count] {
-                if current_depth + 1 < max_depth {
-                    // Recurse deeper
-                    print_node(nodes, kind, child, child_limit, max_depth, current_depth + 1);
-                } else {
-                    let prefix = if child.depth.is_some() { "#" } else { " " };
-                    let text = truncate(&child.text, 72);
-                    println!("{child_indent}{prefix} [{} L{}] {text}", child.id.short, child.line_number);
-                }
-            }
-            if show_count < total {
-                println!("{child_indent}... and {} more", total - show_count);
+        if current_depth < max_depth {
+            if let Some(grandkids) = forward.get(kid) {
+                print_children(csvs_dir, forward, grandkids, max_depth, current_depth + 1);
             }
         }
     }
 }
 
-/// Print prev/next neighbors.
-/// For structure tree: siblings at the same depth under the same parent.
-/// For source/target: file-order neighbors.
-fn print_neighbors(nodes: &[ScannedNode], kind: &TreeKind, node: &ScannedNode) {
-    let idx = match nodes.iter().position(|n| n.line_number == node.line_number) {
-        Some(i) => i,
-        None => return,
-    };
-
-    match kind {
-        TreeKind::Structure => {
-            // Find siblings: nodes at same depth under same parent
-            let siblings = find_siblings(nodes, node);
-            let sib_idx = siblings.iter().position(|n| n.line_number == node.line_number);
-            if let Some(si) = sib_idx {
-                if si > 0 {
-                    println!("  prev: [{}]", siblings[si - 1].id.short);
-                }
-                if si + 1 < siblings.len() {
-                    println!("  next: [{}]", siblings[si + 1].id.short);
+/// Print bridge counterparts.
+fn print_bridges(csvs_dir: &Path, tree_name: &str, uuid: &str) -> Result<(), String> {
+    match tree_name {
+        "source" => {
+            let bridge_path = csvs_dir.join("source-structure.csv");
+            if bridge_path.exists() {
+                let (forward, _) = store::load_bridge(&bridge_path)?;
+                if let Some(targets) = forward.get(uuid) {
+                    println!("  structure:");
+                    for t in targets {
+                        let short = store::short_id(t);
+                        let prose = store::read_prose(csvs_dir, t);
+                        let text = if prose.is_empty() { "(empty)".to_string() } else { truncate(&prose, 60) };
+                        println!("    [{short}] {text}");
+                    }
                 }
             }
         }
-        _ => {
-            // File-order neighbors
-            if idx > 0 {
-                println!("  prev: [{}]", nodes[idx - 1].id.short);
-            }
-            if idx + 1 < nodes.len() {
-                println!("  next: [{}]", nodes[idx + 1].id.short);
-            }
-        }
-    }
-}
-
-/// Find direct children of a node.
-/// For structure tree: only heading children (depth+1), not action blocks.
-/// For source/target: all direct children including action blocks.
-fn find_children<'a>(
-    nodes: &'a [ScannedNode],
-    kind: &TreeKind,
-    parent: &ScannedNode,
-) -> Vec<&'a ScannedNode> {
-    let idx = match nodes.iter().position(|n| n.line_number == parent.line_number) {
-        Some(i) => i,
-        None => return vec![],
-    };
-    let parent_depth = match parent.depth {
-        Some(d) => d,
-        None => return vec![],
-    };
-    let child_depth = parent_depth + 1;
-
-    let mut children = vec![];
-    for node in &nodes[idx + 1..] {
-        match node.depth {
-            Some(d) if d <= parent_depth => break,
-            Some(d) if d == child_depth => children.push(node),
-            None => {
-                // Action blocks are children in source/target, but not in structure
-                if *kind != TreeKind::Structure {
-                    children.push(node);
+        "structure" => {
+            let ss_path = csvs_dir.join("source-structure.csv");
+            if ss_path.exists() {
+                let (_, reverse) = store::load_bridge(&ss_path)?;
+                if let Some(sources) = reverse.get(uuid) {
+                    println!("  source:");
+                    for s in sources {
+                        let short = store::short_id(s);
+                        let prose = store::read_prose(csvs_dir, s);
+                        let text = if prose.is_empty() { "(empty)".to_string() } else { truncate(&prose, 60) };
+                        println!("    [{short}] {text}");
+                    }
                 }
             }
-            _ => {}
+            let st_path = csvs_dir.join("structure-target.csv");
+            if st_path.exists() {
+                let (forward, _) = store::load_bridge(&st_path)?;
+                if let Some(targets) = forward.get(uuid) {
+                    println!("  target:");
+                    for t in targets {
+                        let short = store::short_id(t);
+                        let prose = store::read_prose(csvs_dir, t);
+                        let text = if prose.is_empty() { "(empty)".to_string() } else { truncate(&prose, 60) };
+                        println!("    [{short}] {text}");
+                    }
+                }
+            }
         }
+        "target" => {
+            let bridge_path = csvs_dir.join("structure-target.csv");
+            if bridge_path.exists() {
+                let (_, reverse) = store::load_bridge(&bridge_path)?;
+                if let Some(sources) = reverse.get(uuid) {
+                    println!("  structure:");
+                    for s in sources {
+                        let short = store::short_id(s);
+                        let prose = store::read_prose(csvs_dir, s);
+                        let text = if prose.is_empty() { "(empty)".to_string() } else { truncate(&prose, 60) };
+                        println!("    [{short}] {text}");
+                    }
+                }
+            }
+        }
+        _ => {}
     }
-    children
+    Ok(())
 }
 
-/// Find siblings of a node: other children of the same parent at the same depth.
-fn find_siblings<'a>(nodes: &'a [ScannedNode], node: &ScannedNode) -> Vec<&'a ScannedNode> {
-    // Find the parent
-    let parent = match scan::find_parent(nodes, node) {
-        Some(p) => p,
-        None => {
-            // No parent — siblings are all nodes at the same depth (top-level)
-            let node_depth = node.depth;
-            return nodes.iter()
-                .filter(|n| n.depth == node_depth)
-                .collect();
-        }
-    };
-
-    let parent_idx = match nodes.iter().position(|n| n.line_number == parent.line_number) {
-        Some(i) => i,
-        None => return vec![],
-    };
-    let parent_depth = match parent.depth {
-        Some(d) => d,
-        None => return vec![],
-    };
-
-    let node_depth = node.depth;
-    let mut siblings = vec![];
-    for n in &nodes[parent_idx + 1..] {
-        match n.depth {
-            Some(d) if d <= parent_depth => break,
-            d if d == node_depth => siblings.push(n),
-            _ => {}
-        }
+/// Infer a human-readable kind label from tree position and prose.
+fn node_kind(has_parent: bool, has_children: bool, prose: &str) -> &'static str {
+    match (has_parent, has_children, prose.is_empty()) {
+        (false, _, _) => "root",
+        (true, true, true) => "paragraph",   // container, no text
+        (true, true, false) => "heading",     // container with text
+        (true, false, true) => "empty",       // leaf, no text yet
+        (true, false, false) => "leaf",       // leaf with text
     }
-    siblings
 }
 
-/// Truncate a string to max_len characters, appending "..." if truncated.
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
+    // Take first line only, then truncate
+    let first_line = s.lines().next().unwrap_or(s);
+    if first_line.len() <= max_len {
+        first_line.to_string()
     } else {
-        let end = s.char_indices()
+        let end = first_line
+            .char_indices()
             .nth(max_len)
             .map(|(i, _)| i)
-            .unwrap_or(s.len());
-        format!("{}...", &s[..end])
+            .unwrap_or(first_line.len());
+        format!("{}...", &first_line[..end])
     }
-}
-
-/// Print bridge counterparts by querying CSVS tablets.
-async fn print_bridges(csvs_dir: &Path, kind: &TreeKind, short_id: &str) {
-    match kind {
-        TreeKind::Source => {
-            if let Some(ids) = lookup_forward(csvs_dir, "source", "structure", short_id).await {
-                println!("  structure:");
-                for id in ids {
-                    println!("    [{id}]");
-                }
-            }
-        }
-        TreeKind::Structure => {
-            if let Some(ids) = lookup_reverse(csvs_dir, "source", "structure", short_id).await {
-                println!("  source:");
-                for id in ids {
-                    println!("    [{id}]");
-                }
-            }
-            if let Some(ids) = lookup_forward(csvs_dir, "structure", "target", short_id).await {
-                println!("  target:");
-                for id in ids {
-                    println!("    [{id}]");
-                }
-            }
-        }
-        TreeKind::Target => {
-            if let Some(ids) = lookup_reverse(csvs_dir, "structure", "target", short_id).await {
-                println!("  structure:");
-                for id in ids {
-                    println!("    [{id}]");
-                }
-            }
-        }
-    }
-}
-
-/// Given tablet "base-leaf.csv", find all leaf values where base starts with prefix.
-/// Reopens the dataset each time because select_record consumes self.
-async fn lookup_forward(
-    csvs_dir: &Path,
-    base: &str,
-    leaf: &str,
-    id_prefix: &str,
-) -> Option<Vec<String>> {
-    let dir = PathBuf::from(csvs_dir);
-    let dataset = Dataset::open(&dir).await.ok()?;
-
-    let query = Entry {
-        base: base.to_string(),
-        base_value: None,
-        leader_value: None,
-        leaves: std::collections::HashMap::from([(
-            leaf.to_string(),
-            vec![Entry::new(leaf)],
-        )]),
-    };
-
-    let results: Vec<Entry> = dataset.select_record(vec![query]).await.ok()?;
-    let mut matches = vec![];
-    for entry in &results {
-        if let Some(bv) = &entry.base_value {
-            if bv.starts_with(id_prefix) {
-                if let Some(leaves) = entry.leaves.get(leaf) {
-                    for l in leaves {
-                        if let Some(lv) = &l.base_value {
-                            let short = lv.split('-').next().unwrap_or(lv);
-                            matches.push(short.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if matches.is_empty() { None } else { Some(matches) }
-}
-
-/// Reverse lookup: given tablet "base-leaf.csv", find all base values where leaf starts with prefix.
-async fn lookup_reverse(
-    csvs_dir: &Path,
-    base: &str,
-    leaf: &str,
-    id_prefix: &str,
-) -> Option<Vec<String>> {
-    let dir = PathBuf::from(csvs_dir);
-    let dataset = Dataset::open(&dir).await.ok()?;
-
-    let query = Entry {
-        base: base.to_string(),
-        base_value: None,
-        leader_value: None,
-        leaves: std::collections::HashMap::from([(
-            leaf.to_string(),
-            vec![Entry::new(leaf)],
-        )]),
-    };
-
-    let results: Vec<Entry> = dataset.select_record(vec![query]).await.ok()?;
-    let mut matches = vec![];
-    for entry in &results {
-        if let Some(leaves) = entry.leaves.get(leaf) {
-            for l in leaves {
-                if let Some(lv) = &l.base_value {
-                    if lv.starts_with(id_prefix) {
-                        if let Some(bv) = &entry.base_value {
-                            let short = bv.split('-').next().unwrap_or(bv);
-                            matches.push(short.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if matches.is_empty() { None } else { Some(matches) }
 }

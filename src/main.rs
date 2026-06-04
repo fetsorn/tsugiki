@@ -1,7 +1,5 @@
 mod commands;
-mod resolve;
-mod scan;
-mod types;
+mod store;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -15,9 +13,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Parse a markdown source file into source and structure trees
+    Init {
+        /// Path to the source markdown file
+        source: PathBuf,
+
+        /// Keep paragraphs as leaves (don't split into sentences)
+        #[arg(long)]
+        no_split: bool,
+    },
+
     /// Display a node with full context
     Show {
-        /// Address: line number, short hex id, or full UUID
+        /// Address: short hex id or full UUID
         addr: String,
 
         /// Show only source tree
@@ -41,6 +49,47 @@ enum Command {
         depth: usize,
     },
 
+    /// Render a tree to fountain and/or markdown
+    Render {
+        /// Which tree: source, structure, or target
+        tree: String,
+
+        /// Only produce markdown, skip fountain
+        #[arg(long)]
+        md_only: bool,
+    },
+
+    /// Show the next node that needs attention
+    Next,
+
+    /// Write a target sentence
+    Write {
+        /// The sentence text
+        text: String,
+
+        /// Parent node address (default: last used parent or root)
+        #[arg(long)]
+        parent: Option<String>,
+
+        /// Create the target root node
+        #[arg(long)]
+        root: bool,
+    },
+
+    /// Link a target node to structure (provenance) or reparent it
+    Link {
+        /// Target node address
+        addr: String,
+
+        /// Structure node to map to
+        #[arg(long)]
+        structure: Option<String>,
+
+        /// New parent node address
+        #[arg(long)]
+        parent: Option<String>,
+    },
+
     /// Write annotation text to a structure node, or show next unannotated node
     Annotate {
         /// The annotation text (omit to show next unannotated node)
@@ -60,14 +109,25 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
     // Intent directory is the current working directory
     let intent_dir = PathBuf::from(".");
 
     let result = match cli.command {
+        Command::Init { ref source, no_split } => {
+            commands::init::run(&intent_dir, source, no_split)
+        }
+        Command::Render { ref tree, md_only } => {
+            let render_tree = match tree.as_str() {
+                "source" => commands::render::RenderTree::Source,
+                "structure" => commands::render::RenderTree::Structure,
+                "target" => commands::render::RenderTree::Target,
+                _ => return eprintln!("error: tree must be source, structure, or target"),
+            };
+            commands::render::run(&intent_dir, render_tree, md_only)
+        }
         Command::Show {
             ref addr,
             source,
@@ -77,15 +137,32 @@ async fn main() {
             depth,
         } => {
             let tree_filter = if source {
-                Some(types::TreeKind::Source)
+                Some("source")
             } else if structure {
-                Some(types::TreeKind::Structure)
+                Some("structure")
             } else if target {
-                Some(types::TreeKind::Target)
+                Some("target")
             } else {
                 None
             };
-            commands::show::run(&intent_dir, addr, tree_filter.as_ref(), limit, depth).await
+            commands::show::run(&intent_dir, addr, tree_filter, limit, depth)
+        }
+        Command::Write {
+            ref text,
+            ref parent,
+            root,
+        } => {
+            commands::write::run(&intent_dir, text, parent.as_deref(), root)
+        }
+        Command::Link {
+            ref addr,
+            ref structure,
+            ref parent,
+        } => {
+            commands::link::run(&intent_dir, addr, structure.as_deref(), parent.as_deref())
+        }
+        Command::Next => {
+            commands::next::run(&intent_dir)
         }
         Command::Annotate {
             ref addr,
@@ -94,21 +171,18 @@ async fn main() {
             overwrite,
         } => match (text, addr) {
             (Some(t), Some(a)) => {
-                let res = commands::annotate::run(&intent_dir, a, t, note.as_deref(), overwrite).await;
+                let res = commands::annotate::run(&intent_dir, a, t, note.as_deref(), overwrite);
                 if res.is_ok() {
-                    // Show next unannotated node
-                    let _ = commands::next::run(&intent_dir).await;
+                    let _ = commands::next::run(&intent_dir);
                 }
                 res
             }
             (Some(t), None) => {
-                // No addr — find next unannotated node and annotate it
-                match commands::next::find_next(&intent_dir).await {
+                match commands::next::find_next_unannotated(&intent_dir) {
                     Ok(Some(next_addr)) => {
-                        let res = commands::annotate::run(&intent_dir, &next_addr, t, note.as_deref(), overwrite).await;
+                        let res = commands::annotate::run(&intent_dir, &next_addr, t, note.as_deref(), overwrite);
                         if res.is_ok() {
-                            // Show next unannotated node after this one
-                            let _ = commands::next::run(&intent_dir).await;
+                            let _ = commands::next::run(&intent_dir);
                         }
                         res
                     }
@@ -116,7 +190,7 @@ async fn main() {
                     Err(e) => Err(e),
                 }
             }
-            (None, _) => commands::next::run(&intent_dir).await,
+            (None, _) => commands::next::run(&intent_dir),
         },
     };
 
