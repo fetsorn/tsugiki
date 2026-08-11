@@ -67,13 +67,17 @@ enum Command {
         /// The sentence text
         text: String,
 
-        /// Parent node address (default: last used parent or root)
+        /// Parent node address (explicit mode — no auto-linking)
         #[arg(long)]
         parent: Option<String>,
 
         /// Create the target root node
         #[arg(long)]
         root: bool,
+
+        /// Link to the same structure node(s) as the previous write (1:N split)
+        #[arg(long)]
+        same: bool,
     },
 
     /// Link a target node to structure (provenance) or reparent it
@@ -151,8 +155,15 @@ fn main() {
             ref text,
             ref parent,
             root,
+            same,
         } => {
-            commands::write::run(&intent_dir, text, parent.as_deref(), root)
+            let auto = parent.is_none() && !root;
+            let res = commands::write::run(&intent_dir, text, parent.as_deref(), root, same);
+            if res.is_ok() && auto {
+                println!();
+                let _ = commands::next::run(&intent_dir);
+            }
+            res
         }
         Command::Link {
             ref addr,

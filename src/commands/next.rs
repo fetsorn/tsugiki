@@ -128,25 +128,106 @@ pub fn run(intent_dir: &Path) -> Result<(), String> {
             std::collections::HashMap::new()
         };
         let ss_path = csvs_dir.join("source-structure.csv");
-        let source_text = if ss_path.exists() {
-            let (_, ss_reverse) = store::load_bridge(&ss_path)?;
-            if let Some(sources) = ss_reverse.get(uuid) {
-                sources.iter()
-                    .map(|s| gather_source_text(&csvs_dir, s, &source_forward))
-                    .filter(|p| !p.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            } else {
-                String::new()
-            }
+        let ss_reverse = if ss_path.exists() {
+            store::load_bridge(&ss_path)?.1
         } else {
-            String::new()
+            std::collections::HashMap::new()
         };
+        let gather_for = |s_uuid: &str| -> String {
+            ss_reverse
+                .get(s_uuid)
+                .map(|sources| {
+                    sources
+                        .iter()
+                        .map(|s| gather_source_text(&csvs_dir, s, &source_forward))
+                        .filter(|p| !p.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                })
+                .unwrap_or_default()
+        };
+        let source_text = gather_for(uuid);
 
         println!("regrow phase");
-        println!("  structure [{short}] {}", first_line(annotation, 80));
+
+        // Intent chain: annotations from the root (document intent) down to
+        // this leaf's parent.
+        let mut chain: Vec<String> = Vec::new();
+        let mut cursor = struct_reverse.get(uuid);
+        while let Some(p) = cursor {
+            let p_prose = store::read_prose(&csvs_dir, p);
+            if !p_prose.is_empty() {
+                chain.push(full_line(&p_prose));
+            }
+            if p == &root {
+                break;
+            }
+            cursor = struct_reverse.get(p);
+        }
+        chain.reverse();
+        if !chain.is_empty() {
+            println!("  intent: {}", chain.join(" → "));
+        }
+
+        let mut ann_lines = annotation.lines();
+        println!("  structure [{short}] {}", ann_lines.next().unwrap_or(""));
+        for note in ann_lines {
+            println!("    {note}");
+        }
         if !source_text.is_empty() {
-            println!("  source: {}", first_line(&source_text, 120));
+            println!("  source: {source_text}");
+        }
+
+        // Group: siblings under the same structure parent — annotation and
+        // source for each, windowed up to 3 before and 3 after the current
+        // leaf, which is marked with ">".
+        if let Some(parent) = struct_reverse.get(uuid) {
+            if let Some(siblings) = struct_forward.get(parent) {
+                let pos = siblings.iter().position(|s| s == uuid).unwrap_or(0);
+                let start = pos.saturating_sub(3);
+                let end = (pos + 4).min(siblings.len());
+                if end > start + 1 {
+                    println!("  group:");
+                    for sib in &siblings[start..end] {
+                        let sib_short = store::short_id(sib);
+                        let sib_ann = store::read_prose(&csvs_dir, sib);
+                        if sib == uuid {
+                            println!("  > [{sib_short}] {}", full_line(&sib_ann));
+                            continue;
+                        }
+                        println!("    [{sib_short}] {}", full_line(&sib_ann));
+                        let sib_src = gather_for(sib);
+                        if !sib_src.is_empty() {
+                            println!("        src: {sib_src}");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Target so far: the last written sentences — what the new one must flow from.
+        let tc_path = csvs_dir.join("target-child.csv");
+        if tc_path.exists() {
+            if let Ok((t_forward, t_reverse)) = store::load_edges(&tc_path) {
+                if let Some(t_root) = store::find_root(&t_forward, &t_reverse) {
+                    let t_order = store::walk_depth_first(&t_root, &t_forward);
+                    let leaves: Vec<&String> = t_order
+                        .iter()
+                        .filter(|u| t_forward.get(*u).map(|k| k.is_empty()).unwrap_or(true))
+                        .collect();
+                    let tail_len = leaves.len().saturating_sub(2);
+                    let tail = &leaves[tail_len..];
+                    if !tail.is_empty() {
+                        println!("  target so far:");
+                        for u in tail {
+                            let t_prose = store::read_prose(&csvs_dir, u);
+                            if !t_prose.is_empty() {
+                                println!("    [{}] {}", store::short_id(u), full_line(&t_prose));
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         return Ok(());
@@ -203,6 +284,11 @@ fn gather_source_text(
         return parts.join(" ");
     }
     String::new()
+}
+
+/// First line of a prose blob, untruncated — display text meant to be worked from.
+fn full_line(s: &str) -> String {
+    s.lines().next().unwrap_or(s).to_string()
 }
 
 fn first_line(s: &str, max_len: usize) -> String {
